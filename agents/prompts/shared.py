@@ -1,5 +1,109 @@
 """Static shared prompt fragments."""
 
+from __future__ import annotations
+
+
+OPTIMIZATION_RL_KEYWORDS = (
+    "reinforcement learning",
+    "offline rl",
+    "online rl",
+    "mdp",
+    "markov decision",
+    "policy learning",
+    "reward function",
+    "gymnasium",
+    "gym env",
+    "environment step",
+    "simulator",
+    "sequential decision",
+    "dynamic decision",
+    "routing",
+    "vehicle routing",
+    "scheduling",
+    "assignment problem",
+    "resource allocation",
+    "portfolio optimization",
+    "knapsack",
+    "combinatorial optimization",
+    "optimization problem",
+    "constraint solver",
+    "cp-sat",
+    "mixed integer",
+    "integer programming",
+    "linear programming",
+    "强化学习",
+    "离线强化学习",
+    "在线强化学习",
+    "马尔可夫决策",
+    "状态空间",
+    "动作空间",
+    "奖励函数",
+    "策略学习",
+    "仿真环境",
+    "序列决策",
+    "路径规划",
+    "路径优化",
+    "车辆路径",
+    "调度",
+    "排程",
+    "分配问题",
+    "资源分配",
+    "组合优化",
+    "运筹优化",
+    "整数规划",
+)
+
+
+def is_optimization_or_rl_task(task_desc: str = "", coldstart_description: str = "") -> bool:
+    """Return True only when the task text strongly suggests optimization/RL."""
+    text = f"{task_desc}\n{coldstart_description}".lower()
+    if not text.strip():
+        return False
+    if "Model" in coldstart_description and "Optimization" in coldstart_description:
+        return True
+    return any(keyword in text for keyword in OPTIMIZATION_RL_KEYWORDS)
+
+
+def get_optimization_rl_strategy(task_desc: str = "", coldstart_description: str = "") -> dict:
+    """Conditional guidance for optimization and reinforcement-learning tasks."""
+    if not is_optimization_or_rl_task(task_desc, coldstart_description):
+        return {}
+
+    return {
+        "Optimization / Reinforcement Learning Strategy (conditional)": [
+            "",
+            "**Activate this section only because the task appears to involve optimization, sequential decision-making, or RL. Do not force RL if the problem is better solved by operations research or heuristics.**",
+            "",
+            "**First decide the problem family:**",
+            "- Static one-shot assignment/routing/scheduling/resource allocation: start with greedy baselines, MILP/CP-SAT/OR-Tools if constraints are explicit, then local search, simulated annealing, tabu search, genetic/evolutionary search, or large-neighborhood search.",
+            "- Sequential decision task with a simulator, transition dynamics, delayed rewards, or logged trajectories: consider an RL formulation.",
+            "- If there are only historical decisions and no safe simulator for exploration, treat it as offline RL or imitation learning; do not use naive online exploration.",
+            "",
+            "**If proposing RL, the plan must explicitly define:**",
+            "- State / observation: all information available at decision time only; no future leakage.",
+            "- Action space: discrete, continuous, or composite actions; include feasibility masks or repair rules for invalid actions.",
+            "- Transition: how an action changes the current partial solution, inventory, capacity, time, position, budget, or other state variables.",
+            "- Reward: aligned with the official objective/evaluation metric; include penalties for constraint violations and optional dense shaping that preserves the final objective.",
+            "- Terminal condition: when an episode ends, including success, infeasible dead-end, timeout, horizon, or completed assignment.",
+            "- Evaluation protocol: validation scenarios, seeds, baseline comparison, constraint violation rate, and final objective/metric.",
+            "",
+            "**Algorithm recommendations by action/data setting:**",
+            "- Discrete online RL: DQN/Rainbow DQN for manageable discrete actions; Rainbow combines Double DQN, prioritized replay, dueling networks, multi-step returns, distributional RL, and noisy exploration.",
+            "- General online RL: PPO is a robust default when the environment is available and actions may be discrete or continuous; add action masks/feasibility repair for combinatorial tasks.",
+            "- Continuous online RL: SAC is often a strong sample-efficient off-policy default; TD3 is a strong deterministic actor-critic baseline.",
+            "- Offline RL: start with behavior cloning as a sanity baseline, then CQL, IQL, TD3+BC, or Decision Transformer when logged trajectories are available.",
+            "- Model-based/world-model methods such as Dreamer-style agents are powerful but usually too complex unless the task provides a rich simulator and enough runtime.",
+            "",
+            "**Implementation expectations if RL is chosen:**",
+            "- Implement a Gymnasium-like environment with `reset(seed=None, options=None)` and `step(action)` returning `(obs, reward, terminated, truncated, info)`.",
+            "- Keep reward calculation and constraint checking as deterministic, testable functions.",
+            "- For combinatorial actions, expose `valid_action_mask` or repair invalid actions before training.",
+            "- Always compare RL against simple OR/heuristic baselines; if RL is slower or less stable, keep the stronger non-RL solver.",
+            "",
+        ]
+    }
+
+
 ROBUSTNESS_GENERALIZATION_STRATEGY = {
     "💡 Recommendation: Robustness & Generalization Strategy": [
         "",

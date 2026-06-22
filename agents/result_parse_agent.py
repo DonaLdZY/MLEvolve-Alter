@@ -1,4 +1,6 @@
 import logging
+import math
+import re
 import time
 from typing import cast
 
@@ -10,8 +12,25 @@ from utils.response import wrap_code
 from engine.validation import call_validate, _validate_submission_with_retry, validate_submission_content_quality
 from agents import data_leakage_agent
 from agents.triggers import should_check_data_leakage
+from agents.prompt_cache import task_section
 
 logger = logging.getLogger("MLEvolve")
+
+FINAL_SCORE_RE = re.compile(
+    r"Final\s+Validation\s+Score\s*[:=]\s*"
+    r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+)
+
+
+def _resolve_exp_id(agent) -> str:
+    explicit = str(getattr(agent.cfg, "exp_id", "") or "").strip()
+    if explicit:
+        return explicit
+    exp_name = str(getattr(agent.cfg, "exp_name", "") or "").strip()
+    parts = exp_name.split("_", 2)
+    if len(parts) >= 3 and parts[2].strip():
+        return parts[2].strip()
+    return exp_name or "task"
 
 metric_direction_func_spec = FunctionSpec(
     name="determine_metric_direction",
@@ -41,12 +60,9 @@ def determine_metric_direction(agent) -> None:
     logger.info("Starting pre-determination of metric optimization direction...")
     logger.info("=" * 80)
 
-    prompt = f"""You are analyzing a machine learning competition task. Your task is to determine whether the evaluation metric should be minimized or maximized.
+    prompt = """You are analyzing a machine learning competition task. Your task is to determine whether the evaluation metric should be minimized or maximized.
 
     **IMPORTANT: Focus on the EVALUATION section in the task description, which specifies the metric used to score submissions.**
-
-    Task Description:
-    {agent.task_desc}
 
     Based on the evaluation metric mentioned in the task description, determine:
     - If the metric should be MINIMIZED (lower is better), set lower_is_better to TRUE.
@@ -61,6 +77,7 @@ def determine_metric_direction(agent) -> None:
 
     Provide clear reasoning based on the evaluation metric specified in the task.
     """
+    user_prompt = task_section(agent.task_desc)
 
     max_retries = 3
     for attempt in range(1, max_retries + 1):
@@ -73,10 +90,11 @@ def determine_metric_direction(agent) -> None:
                 dict,
                 query(
                     system_message=prompt,
-                    user_message=None,
+                    user_message=user_prompt,
                     func_spec=metric_direction_func_spec,
                     model=agent.acfg.feedback.model,
                     temperature=agent.acfg.feedback.temp,
+                    stage_name="feedback",
                     cfg=agent.cfg
                 ),
             )
@@ -149,6 +167,7 @@ def get_review_func_spec(use_memory: bool) -> FunctionSpec:
 
 def _build_introduction(agent) -> str:
     use_memory = getattr(agent.acfg, "use_global_memory", False)
+    submission_required = getattr(agent.acfg, "generate_submission", True)
     intro = (
         "You are a Kaggle grandmaster attending a competition. "
         "You have written code to solve this task and now need to evaluate the output of the code execution. "
@@ -159,6 +178,12 @@ def _build_introduction(agent) -> str:
         "- \"metric\": (number or null) The validation metric value as a raw JSON number (e.g. 0.9995), NOT a string. If failed, use null.\n"
         "- \"lower_is_better\": (boolean) true if the metric should be minimized, false if maximized. Must be a JSON boolean (true/false), NOT a string.\n"
     )
+    if not submission_required:
+        intro += (
+            "\nConfig note: final submission.csv generation is disabled for this run. "
+            "Do NOT mark the execution as buggy merely because it did not create a submission file; "
+            "judge success by execution correctness and the reported validation metric.\n"
+        )
     if use_memory:
         intro += (
             "- \"code_summary\": (string) A concise method summary of the code, covering key parts such as "
@@ -195,7 +220,12 @@ def _save_code_summary(agent, node: SearchNode, response: dict):
         node.code_summary = None
 
 
-def _determine_buggy(node: SearchNode, response: dict, has_csv_submission: bool):
+def _determine_buggy(
+    node: SearchNode,
+    response: dict,
+    has_csv_submission: bool,
+    requires_submission: bool = True,
+):
     failure_reasons = []
     if response["is_bug"]:
         failure_reasons.append("execution error detected")
@@ -203,7 +233,7 @@ def _determine_buggy(node: SearchNode, response: dict, has_csv_submission: bool)
         failure_reasons.append(f"exception raised: {node.exc_type}")
     if response["metric"] is None:
         failure_reasons.append("no metric value reported")
-    if not has_csv_submission:
+    if requires_submission and not has_csv_submission:
         failure_reasons.append("submission file not found")
 
     node.is_buggy = len(failure_reasons) > 0
@@ -212,7 +242,7 @@ def _determine_buggy(node: SearchNode, response: dict, has_csv_submission: bool)
 
 
 def _validate_format_with_retry(agent, node: SearchNode):
-    exp_id = agent.cfg.exp_name.split("_")[2]
+    exp_id = _resolve_exp_id(agent)
     submission_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
 
     status, res = _validate_submission_with_retry(
@@ -249,7 +279,7 @@ def _validate_format_with_retry(agent, node: SearchNode):
 
 
 def _validate_format_simple(agent, node: SearchNode):
-    exp_id = agent.cfg.exp_name.split("_")[2]
+    exp_id = _resolve_exp_id(agent)
     submission_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
 
     status, res = call_validate(exp_id=exp_id, submission_path=submission_path)
@@ -374,6 +404,112 @@ def _save_to_global_memory(agent, node: SearchNode):
             logger.warning(f"[AgentSearch] Failed to save node {node.id} to global memory: {e}")
 
 
+def _extract_final_validation_score(text: str) -> float | None:
+    matches = FINAL_SCORE_RE.findall(text or "")
+    if not matches:
+        return None
+    try:
+        value = float(matches[-1])
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _compact_failure_summary(node: SearchNode) -> str:
+    tail = (node.term_out or "").strip()[-1400:]
+    exc = node.exc_type or "ExecutionError"
+    if tail:
+        return f"Execution failed with {exc}. Tail output:\n{tail}"
+    return f"Execution failed with {exc}."
+
+
+def _normalize_review_response(agent, response: dict) -> dict:
+    response.setdefault("is_bug", True)
+    response.setdefault("summary", "No summary returned by model.")
+    response.setdefault("metric", None)
+    response.setdefault(
+        "lower_is_better",
+        not agent.metric_maximize if agent.metric_maximize is not None else False,
+    )
+
+    metric_val = response.get("metric")
+    if not isinstance(metric_val, (int, float)):
+        try:
+            response["metric"] = float(metric_val)
+        except (TypeError, ValueError):
+            response["metric"] = None
+
+    for bool_field in ("is_bug", "lower_is_better"):
+        v = response.get(bool_field)
+        if isinstance(v, str):
+            response[bool_field] = v.strip().lower() not in ("false", "0", "no", "")
+    return response
+
+
+def _apply_review_response(agent, node: SearchNode, response: dict) -> SearchNode:
+    response = _normalize_review_response(agent, response)
+
+    requires_submission = getattr(agent.acfg, "generate_submission", True)
+    has_csv_submission = _check_submission_file(agent, node) if requires_submission else True
+
+    node.analysis = response["summary"]
+    _save_code_summary(agent, node, response)
+    _determine_buggy(
+        node,
+        response,
+        has_csv_submission,
+        requires_submission=requires_submission,
+    )
+
+    if not node.is_buggy and requires_submission:
+        _validate_format_with_retry(agent, node)
+    elif not node.is_buggy:
+        node.is_valid = True
+
+    if node.is_buggy:
+        node.metric = WorstMetricValue()
+    else:
+        _validate_metric_direction(agent, node, response)
+        _check_data_leakage(agent, node, response)
+
+    status = "FAIL" if node.is_buggy else "PASS"
+    metric_val = node.metric.value if node.metric else None
+    logger.info(f"[parse] node {node.id}: {status} | metric={metric_val}")
+
+    _save_to_global_memory(agent, node)
+
+    return node
+
+
+def _try_deterministic_parse(agent, node: SearchNode) -> SearchNode | None:
+    """Avoid an LLM call when execution status and final score are unambiguous."""
+    if node.exc_type is not None:
+        node.is_buggy = True
+        node.metric = WorstMetricValue()
+        node.analysis = _compact_failure_summary(node)
+        logger.info("[parse] node %s: deterministic failure parse, no LLM call", node.id)
+        return node
+
+    score = _extract_final_validation_score(node.term_out)
+    if score is None:
+        return None
+
+    lower_is_better = not agent.metric_maximize if agent.metric_maximize is not None else False
+    response = {
+        "is_bug": False,
+        "summary": (
+            "Execution completed and printed a deterministic final validation score. "
+            f"Parsed `Final Validation Score` = {score}."
+        ),
+        "metric": score,
+        "lower_is_better": lower_is_better,
+    }
+    if getattr(agent.acfg, "use_global_memory", False):
+        response["code_summary"] = (node.plan or "Deterministically parsed successful execution.")[:800]
+    logger.info("[parse] node %s: deterministic score parse, no LLM call", node.id)
+    return _apply_review_response(agent, node, response)
+
+
 def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
     max_retries = 3
     for retry_idx in range(max_retries):
@@ -381,6 +517,9 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
             logger.info(f"Agent is parsing execution results for node {node.id}")
 
             node.absorb_exec_result(exec_result)
+            deterministic = _try_deterministic_parse(agent, node)
+            if deterministic is not None:
+                return deterministic
 
             introduction = _build_introduction(agent)
             prompt = {
@@ -392,56 +531,21 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
             response = cast(
                 dict,
                 query(
-                    system_message=prompt,
-                    user_message=None,
+                    system_message={"Introduction": introduction},
+                    user_message=(
+                        f"{task_section(agent.task_desc)}\n"
+                        f"# Implementation\n{prompt['Implementation']}\n\n"
+                        f"# Execution output\n{prompt['Execution output']}"
+                    ),
                     func_spec=get_review_func_spec(getattr(agent.acfg, "use_global_memory", False)),
                     model=agent.acfg.feedback.model,
                     temperature=agent.acfg.feedback.temp,
+                    stage_name="feedback",
                     cfg=agent.cfg
                 ),
             )
 
-            # Gemini structured output may omit required fields; fill defaults
-            response.setdefault("is_bug", True)
-            response.setdefault("summary", "No summary returned by model.")
-            response.setdefault("metric", None)
-            response.setdefault("lower_is_better",
-                                not agent.metric_maximize if agent.metric_maximize is not None else False)
-
-            metric_val = response.get("metric")
-            if not isinstance(metric_val, (int, float)):
-                try:
-                    response["metric"] = float(metric_val)
-                except (TypeError, ValueError):
-                    response["metric"] = None
-
-            for bool_field in ("is_bug", "lower_is_better"):
-                v = response.get(bool_field)
-                if isinstance(v, str):
-                    response[bool_field] = v.strip().lower() not in ("false", "0", "no", "")
-
-            has_csv_submission = _check_submission_file(agent, node)
-
-            node.analysis = response["summary"]
-            _save_code_summary(agent, node, response)
-            _determine_buggy(node, response, has_csv_submission)
-
-            if not node.is_buggy:
-                _validate_format_with_retry(agent, node)
-
-            if node.is_buggy:
-                node.metric = WorstMetricValue()
-            else:
-                _validate_metric_direction(agent, node, response)
-                _check_data_leakage(agent, node, response)
-
-            status = "FAIL" if node.is_buggy else "PASS"
-            metric_val = node.metric.value if node.metric else None
-            logger.info(f"[parse] node {node.id}: {status} | metric={metric_val}")
-
-            _save_to_global_memory(agent, node)
-
-            return node
+            return _apply_review_response(agent, node, response)
         except Exception as e:
             logger.warning(f"[parse] tool call failed: {e}")
             continue

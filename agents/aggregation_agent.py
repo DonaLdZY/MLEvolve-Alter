@@ -6,6 +6,7 @@ from engine.search_node import SearchNode
 from agents.prompts import prompt_resp_fmt, get_impl_guideline_from_agent
 from agents.planner import build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 from engine.conditions import should_trigger_branch_fusion  # noqa: F401
 from agents.triggers import register_node
@@ -159,15 +160,15 @@ def run(
     data_preview = getattr(agent, "data_preview", "") or ""
     assistant_prefix = (
         "Let me approach this systematically.\n"
-        f"First, I'll examine the dataset:\n{data_preview}\n"
+        f"{dataset_reference_sentence(prompt['Task description'], data_preview)}\n"
         "I have access to multiple successful approaches from different independent branches. "
         "I'll synthesize these diverse insights and create a completely new solution "
         "that combines the best ideas in an innovative way."
     )
 
     user_prompt = (
-        f"\n# Task description\n{prompt['Task description']}\n\n"
-        f"# Branch Experiences\n{prompt['Branch Experiences']}\n\n{instructions}"
+        f"{task_section(prompt['Task description'], data_preview)}\n"
+        f"{instructions}\n# Branch Experiences\n{prompt['Branch Experiences']}"
     )
     prompt_complete = build_chat_prompt_for_model(agent.acfg.code.model, introduction, user_prompt, assistant_prefix)
 

@@ -2,7 +2,7 @@
 #  Data & paths
 # ============================================================
 data_dir: null
-dataset_dir: ""  # path to mle-bench dataset root, e.g. /data/mle-bench
+dataset_dir: null  # optional unless use_grading_server=True; path to mle-bench dataset root, e.g. /data/mle-bench
 desc_file: null
 goal: null
 eval: null
@@ -41,18 +41,25 @@ agent:
   initial_drafts: 3
   seed: 42
   data_preview: True
+  generate_submission: True
 
   # --- LLM models ---
   code:
-    model: gemini-3-pro-preview
+    model: deepseek-v4-pro
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: "https://api.deepseek.com/beta"   # Gemini API endpoint
+    api_key: "sk-170ca9aab9684a41bf9c93a0c3f95f26"    # Gemini API key
+    enable_thinking: null   # null=provider default, true=force enable, false=force disable when backend supports it
+    reasoning_effort: null  # null=provider default; allowed: low|medium|high|xhigh (DeepSeek maps low/medium->high, xhigh->max)
+    max_tokens: null        # null/0=do not pass max_tokens; provider/API default decides output cap
   feedback:
-    model: gemini-3-pro-preview
+    model: deepseek-v4-pro
     temp: 1
-    base_url: ""   # Gemini API endpoint
-    api_key: ""    # Gemini API key
+    base_url: "https://api.deepseek.com/beta"   # Gemini API endpoint
+    api_key: "sk-170ca9aab9684a41bf9c93a0c3f95f26"    # Gemini API key
+    enable_thinking: null   # null=provider default, true=force enable, false=force disable when backend supports it
+    reasoning_effort: null  # null=provider default; allowed: low|medium|high|xhigh (DeepSeek maps low/medium->high, xhigh->max)
+    max_tokens: null        # null/0=do not pass max_tokens; provider/API default decides output cap
 
   # --- Submission check ---
   check_data_leakage: True
@@ -68,8 +75,14 @@ agent:
   # --- Global memory ---
   use_global_memory: True
   memory_similarity_threshold: 0.7
+  memory_embedding_backend: openai          # local | openai
+  
   memory_embedding_device: cuda
-  memory_embedding_model_path: "BAAI/bge-base-en-v1.5"  # HuggingFace model name or local path
+  memory_embedding_model_path: "BAAI/bge-base-en-v1.5"  # HuggingFace model name or local path (local backend)
+
+  memory_embedding_api_key: "sk-4d15bcf18df74d76a253d8ea662c5a34"             # for remote embedding APIs
+  memory_embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"            # e.g. https://dashscope.aliyuncs.com/compatible-mode/v1
+  memory_embedding_model: "text-embedding-v4"               # e.g. text-embedding-v4
 
   # --------------------------------------------------------
   #  Search tree params
@@ -141,3 +154,5 @@ coldstart:
   task_json_path: "engine/coldstart/competition_tag_classified.json"
   model_json_path: "engine/coldstart/models_guidance_classified.json"
   description: ""
+
+use_grading_server: False

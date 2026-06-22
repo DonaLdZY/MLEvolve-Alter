@@ -17,14 +17,21 @@ from typing import List, Tuple, Dict, Any
 
 from llm import generate, compile_prompt_to_md
 from utils.response import extract_code, extract_text_up_to_code, wrap_code
-from agents.planner.base_planner import (
-    PLANNING_ALLOWED_MODULES,
-    PLANNING_JSON_FORMAT,
-    PLANNING_JSON_SCHEMA,
-    parse_planning_response,
-)
+from agents.prompts import is_optimization_or_rl_task
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
+
+
+def _generate_submission_enabled(agent_instance) -> bool:
+    return getattr(agent_instance.acfg, "generate_submission", True)
+
+
+def _optimization_rl_enabled(agent_instance, task_desc: str = "") -> bool:
+    return is_optimization_or_rl_task(
+        task_desc=task_desc or getattr(agent_instance, "task_desc", ""),
+        coldstart_description=getattr(agent_instance, "coldstart_description", ""),
+    )
 
 
 @dataclass
@@ -95,7 +102,7 @@ class StepAgent:
         improvement_mode: bool = False,
         previous_module_code: str = "",
         improvement_strategy: str = "",
-    ) -> str:
+    ) -> str | dict[str, str]:
         base_intro = prompt_base.get("Introduction", "")
 
         if context.stage == "improve":
@@ -127,16 +134,29 @@ class StepAgent:
         else:
             prev_summary = "This is the first step, no previous steps."
 
+        generate_submission = _generate_submission_enabled(agent_instance)
         guidelines_to_use = self.guidelines.copy()
+        current_step_description = self.description
 
-        use_pretrain = (
+        if self.name == "training_evaluation" and not generate_submission:
+            current_step_description = (
+                "Implement the training loop, validation, metric tracking, model saving, "
+                "and configured non-submission artifacts."
+            )
+            guidelines_to_use.append(
+                "CONFIG: Final submission generation is disabled. Do NOT force creation of `submission.csv`; "
+                "focus on training, validation metric computation, and reusable inference code."
+            )
+
+        use_exact_coldstart_template = (
             hasattr(agent_instance, 'use_coldstart') and
             agent_instance.use_coldstart and
             hasattr(agent_instance, 'coldstart_description') and
-            agent_instance.coldstart_description != "None model"
+            agent_instance.coldstart_description != "None model" and
+            "Reference pattern" not in str(agent_instance.coldstart_description)
         )
 
-        if use_pretrain and context.stage == "draft":
+        if use_exact_coldstart_template and context.stage == "draft":
             if self.name == "model_design":
                 pretrain_emphasis = [
                     "**CRITICAL: You MUST prioritize using the recommended pretrained models provided in the Implementation guideline section below.**",
@@ -186,7 +206,7 @@ class StepAgent:
             "Previous steps": prev_summary,
             "Current step": {
                 "Name": self.name,
-                "Description": self.description,
+                "Description": current_step_description,
             },
             "Instructions": prompt_instructions,
         }
@@ -208,10 +228,10 @@ class StepAgent:
         instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
         if context.stage == "draft":
-            okay_text = "Let me approach this systematically.\nFirst, I'll examine the dataset:"
+            okay_text = "Let me approach this systematically."
             assistant_suffix = ""
         elif context.stage == "improve":
-            okay_text = "Let me approach this systematically.\nFirst, I'll examine the dataset:"
+            okay_text = "Let me approach this systematically."
             if improvement_mode and previous_module_code:
                 previous_module_code_wrapped = wrap_code(previous_module_code)
                 execution_output_wrapped = wrap_code(context.execution_output, lang="") if context.execution_output else "(No execution output available)"
@@ -232,7 +252,7 @@ class StepAgent:
             else:
                 assistant_suffix = ""
         else:
-            okay_text = "Let me approach this systematically.\nFirst, I'll examine the dataset:"
+            okay_text = "Let me approach this systematically."
             assistant_suffix = ""
 
         model_name = agent_instance.acfg.code.model.lower()
@@ -249,14 +269,19 @@ class StepAgent:
             previous_solution_section = f"\n# Previous solution\n{prompt['Previous solution']['Code']}\n"
 
         user_prompt = (
-            f"\n# Task description\n{prompt['Task description']}\n\n"
+            f"{task_section(prompt['Task description'], prompt['Data preview'])}\n"
+            f"{instructions}"
             f"{memory_section}\n"
             f"{previous_solution_section}"
             f"# Previous steps\n{prompt['Previous steps']}\n\n"
             f"# Current step: {prompt['Current step']['Name']}\n{prompt['Current step']['Description']}\n\n"
-            f"{instructions}"
         )
-        return f"{introduction}\n\n{user_prompt}\n\n{okay_text}\n{prompt['Data preview']}{assistant_suffix}"
+        assistant = f"{okay_text}\n{dataset_reference_sentence(prompt['Task description'], prompt['Data preview'])}{assistant_suffix}"
+        return {
+            "system": introduction,
+            "user": user_prompt,
+            "assistant": assistant,
+        }
 
 
 
@@ -306,7 +331,7 @@ class MetaAgent:
         prompt_base: Dict[str, Any],
         agent_instance,
         context: StepwiseContext,
-        ) -> Tuple[str, str]:
+        ) -> str | dict[str, str]:
         introduction = (
             "You are a Kaggle grandmaster attending a competition, an expert in writing clean, efficient, and competition-winning Python code for ML tasks. "
             "You have received code snippets from a team of specialized agents, each focusing on a specific part of the ML pipeline. "
@@ -330,15 +355,28 @@ class MetaAgent:
             "There should be no additional headings or text in your response."
         )
 
+        output_guideline = (
+            "- Make sure the final code saves a reusable model artifact, defines `predict(model_path, data)`, prints validation metric (must match task's Evaluation section), and saves submission.csv"
+            if _generate_submission_enabled(agent_instance)
+            else "- Make sure the final code saves a reusable model artifact, defines `predict(model_path, data)`, and prints validation metric (must match task's Evaluation section); do not force submission.csv because final submission generation is disabled"
+        )
+        execution_flow = (
+            "data processing & feature engineering -> RL environment / optimization solver design -> model design -> training & evaluation"
+            if _optimization_rl_enabled(agent_instance, task_desc)
+            else "data processing & feature engineering -> model design -> training & evaluation"
+        )
+
         prompt_instructions["Merge guidelines"] = [
             "- Combine all code sections into a single, runnable Python script",
             "- CRITICAL: You are a MERGER, not a designer. Faithfully integrate the code from all steps. Do NOT introduce new models, algorithms, or approaches that were not in the original steps.",
             "- Ensure variable names are consistent across steps",
             "- Remove duplicate imports and definitions",
             "- Resolve conflicts between steps by following the earlier step's design (e.g., model_design defines the model, training_evaluation trains it)",
-            "- Ensure the execution flow is logical: data processing & feature engineering -> model design -> training & evaluation",
-            "- Make sure the final code prints validation metric (must match task's Evaluation section) and saves submission.csv",
+            f"- Ensure the execution flow is logical: {execution_flow}",
+            output_guideline,
             "- The code should be a single-file Python program that can be executed as-is",
+            "- The merged code MUST save the best trained model/preprocessing artifact under ./working, ./models, ./artifacts, or ./checkpoints.",
+            "- The merged code MUST expose `def predict(model_path, data): ...` and validation/test/submission inference must use this function or the same internal inference routine.",
             "- Assume previous steps have NOT been executed; do not skip execution steps and only read files or outputs.",
             "- All parts must work together seamlessly",
         ]
@@ -370,7 +408,7 @@ class MetaAgent:
             else:
                 memory_section = f"\n# Memory\nBelow is a record of previous solution attempts and their outcomes:\n {prompt['Memory']}\n"
 
-        okay_text = "Let me approach this systematically.\nFirst, I'll examine the dataset:"
+        okay_text = "Let me approach this systematically."
 
         if context.stage == "improve":
             if context.previous_code:
@@ -385,16 +423,21 @@ class MetaAgent:
                 assistant_suffix = ""
         else:
             memory_section = f"# Memory\nBelow is a record of previous solution attempts and their outcomes:\n {prompt['Memory']}"
-            okay_text = "Let me approach this systematically.\nFirst, I'll examine the dataset:"
+            okay_text = "Let me approach this systematically."
             assistant_suffix = ""
 
         user_prompt = (
-            f"\n# Task description\n{prompt['Task description']}\n\n"
+            f"{task_section(prompt['Task description'], prompt['Data preview'])}\n"
+            f"{instructions}"
             f"{memory_section}\n\n"
             f"# Step results\n{prompt['Step results']}\n\n"
-            f"{instructions}"
         )
-        return f"{introduction}\n\n{user_prompt}\n\n{okay_text}\n{prompt['Data preview']}{assistant_suffix}"
+        assistant = f"{okay_text}\n{dataset_reference_sentence(prompt['Task description'], prompt['Data preview'])}{assistant_suffix}"
+        return {
+            "system": introduction,
+            "user": user_prompt,
+            "assistant": assistant,
+        }
 
 
     def _simple_concat(self, step_results: List[Dict[str, str]]) -> str:
@@ -404,8 +447,8 @@ class MetaAgent:
         return "\n".join(code_parts)
 
 
-def create_default_step_agents() -> List[StepAgent]:
-    return [
+def create_default_step_agents(include_rl: bool = False) -> List[StepAgent]:
+    step_agents = [
         StepAgent(
             name="data_processing_and_feature_engineering",
             introduction="You are a Data Preparation Specialist responsible for data loading, cleaning, and feature engineering.",
@@ -416,13 +459,37 @@ def create_default_step_agents() -> List[StepAgent]:
                 "IMPORTANT: Apply feature engineering techniques such as feature scaling, encoding, transformation, and data augmentation methods appropriate for the task. Explore and implement feature engineering strategies that can enhance the model's ability to learn from the data.",
                 "CRITICAL: Do NOT build models, write training code, or perform evaluation. Focus ONLY on data preparation and feature engineering.",
             ],
-        ),
+        )
+    ]
+
+    if include_rl:
+        step_agents.append(
+            StepAgent(
+                name="rl_environment_design",
+                introduction="You are an Optimization and Reinforcement Learning Environment Specialist responsible for formalizing decision processes.",
+                description="For optimization/RL tasks, define the solver interface and, if RL is appropriate, implement the environment: state, action, transition, reward, terminal conditions, and validation hooks.",
+                guidelines=[
+                    "First decide whether RL is actually appropriate. If the task is a static one-shot optimization problem, implement a deterministic optimizer/heuristic interface instead of forcing RL.",
+                    "If RL is chosen, explicitly define observation/state using only information available at decision time; never include future labels or evaluation-only information.",
+                    "Define the action space, including action masks, feasibility repair, or decomposition for composite actions such as assign/order/route/schedule decisions.",
+                    "Implement transition logic as deterministic, testable functions that update the partial solution, capacities, time, inventory, budget, position, or other state variables.",
+                    "Design reward to align with the official objective/metric, with constraint penalties and optional dense shaping that does not change the final objective.",
+                    "Define terminal and truncation conditions: completed assignment, infeasible dead-end, horizon/time limit, or validation episode end.",
+                    "When RL is used, expose a Gymnasium-like API: `reset(seed=None, options=None)` and `step(action)` returning `(obs, reward, terminated, truncated, info)`.",
+                    "Always provide a baseline solver path (greedy, local search, CP-SAT/MILP/OR-Tools when available) so training/evaluation can compare RL against non-RL optimization.",
+                    "CRITICAL: Do NOT write the final model training loop here. Only provide environment/solver primitives, reward/objective functions, and validation helpers for later steps.",
+                ],
+            )
+        )
+
+    step_agents.extend([
         StepAgent(
             name="model_design",
             introduction="You are a Model Architect responsible for designing the model architecture, loss function, and optimizer.",
             description="Design the model architecture (including pretrained models), and define the loss function and optimizer.",
             guidelines=[
                 "Your responsibility: Design the model architecture or choose reference pretrained model, loss function, and optimizer based on the task and the features from previous steps.",
+                "For optimization/RL tasks, if the previous step chose RL, design the policy/value/Q-network and algorithm family to match the action space; otherwise design the non-RL scorer/model used by the optimizer.",
                 "CRITICAL: Do NOT write the training loop, data processing, or feature engineering code. Only define the model, criterion, and optimizer objects.",
                 "IMPORTANT: Consider the task's evaluation metric (from the task description's Evaluation section) when designing the model. The model output format should be compatible with the required evaluation metric calculation.",
                 "IMPORTANT: When designing custom model architectures, include appropriate regularization components (e.g., Dropout layers) to prevent overfitting.",
@@ -430,13 +497,16 @@ def create_default_step_agents() -> List[StepAgent]:
         ),
         StepAgent(
             name="training_evaluation",
-            introduction="You are a Training and Evaluation Expert responsible for implementing training, validation, and submission generation.",
-            description="Implement the training loop, validation, metric tracking, model saving, and generate submission file.",
+            introduction="You are a Training and Evaluation Expert responsible for implementing training, validation, and configured output generation.",
+            description="Implement the training loop, validation, metric tracking, model saving, and configured output artifacts.",
             guidelines=[
-                "Your responsibility: Write the training loop that uses the data, features, model, loss function, and optimizer from previous steps. Include validation, metric tracking, save the best model. Then load the best model, calculate validation metric (must match task's Evaluation section), perform test inference, and save `submission.csv` to `./submission/` directory.",
-                "CRITICAL: Assume that all previous code steps have already been executed. You should start directly from the training step. Do NOT redefine or reload the data, features, model, loss function, or optimizer. These components are already defined and available from the previous steps.",
-                "CRITICAL: You MUST use the variables and objects defined in previous steps AS-IS. Do NOT replace, redesign, or substitute them with different approaches. Your ONLY job is to write the training/evaluation code for what was already defined — not to introduce new models or pipelines.",
-                "IMPORTANT: Your code should assume the data preprocessing, feature engineering, and model design steps have been completed. Simply use the existing variables without copying them.",
+                "Your responsibility: Write the training loop that uses the data, features, model, loss function, and optimizer from previous steps. Include validation, metric tracking, save the best model. Then load the best model, calculate validation metric (must match task's Evaluation section), and generate output artifacts only as required by config and task description.",
+                "CRITICAL: Save a reusable best-model artifact and any preprocessing state under ./working, ./models, ./artifacts, or ./checkpoints. The final best_solution must contain this artifact, not only solution.py.",
+                "CRITICAL: Define `def predict(model_path, data): ...`. It must load the artifact from `model_path`, apply the same preprocessing as validation/test, and return task-required predictions or decisions without retraining.",
+                "For optimization/RL tasks, train/evaluate the chosen solver or policy against the exact objective; report both score and constraint violation statistics when constraints exist.",
+                "CRITICAL: Assume that all previous code steps have already been executed. You should start directly from the training step. Do NOT redefine or reload the data, features, model, loss function, optimizer, environment, or solver primitives. These components are already defined and available from the previous steps.",
+                "CRITICAL: You MUST use the variables and objects defined in previous steps AS-IS. Do NOT replace, redesign, or substitute them with different approaches. Your ONLY job is to write the training/evaluation code for what was already defined - not to introduce new models or pipelines.",
+                "IMPORTANT: Your code should assume the data preprocessing, feature engineering, environment/solver design, and model design steps have been completed. Simply use the existing variables without copying them.",
                 "CRITICAL: Validation metric computation must use the same prediction method as test inference, using training data only as reference, to avoid data leakage and ensure the metric reflects true generalization performance.",
                 "CRITICAL CONSISTENCY REQUIREMENT: Ensure that validation and test inference use IDENTICAL processing logic. Any differences in how validation and test data are handled (such as post-processing, reconstruction, or formatting) can cause large performance gaps between validation and test sets. Maintain consistency across all data processing steps for both validation and test phases.",
                 "CRITICAL: You MUST actively prevent overfitting. Do NOT only focus on validation set metrics, as this can easily cause the model to overfit. You can consider to use standard anti-overfitting techniques as default modeling strategies, including:",
@@ -452,7 +522,8 @@ def create_default_step_agents() -> List[StepAgent]:
                 "CRITICAL: The final line must be: `print(f'Final Validation Score: {{score}}')`. This is required for the score parser.",
             ],
         ),
-    ]
+    ])
+    return step_agents
 
 
 def stepwise_plan_and_code_query(
@@ -470,7 +541,9 @@ def stepwise_plan_and_code_query(
         execution_output=context.get("execution_output", ""),
     )
 
-    step_agents = create_default_step_agents()
+    step_agents = create_default_step_agents(
+        include_rl=_optimization_rl_enabled(agent_instance, prompt_base["Task description"])
+    )
     meta_agent = MetaAgent()
 
     step_results: List[Dict[str, str]] = []

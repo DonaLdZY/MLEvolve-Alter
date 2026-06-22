@@ -12,10 +12,13 @@ import pandas as pd
 from genson import SchemaBuilder
 from pandas.api.types import is_numeric_dtype
 
+from utils.csv_utils import infer_csv_dialect, read_csv_auto
+
 # these files are treated as code (e.g. markdown wrapped)
 code_files = {".py", ".sh", ".yaml", ".yml", ".md", ".html", ".xml", ".log", ".rst"}
 # we treat these files as text (rather than binary) files
 plaintext_files = {".txt", ".csv", ".json", ".tsv"} | code_files
+CSV_PREVIEW_MAX_ROWS = 5000
 
 
 def get_file_len_size(f: Path) -> tuple[int, str]:
@@ -61,7 +64,7 @@ def _walk(path: Path):
         yield p
 
 
-def preview_csv(p: Path, file_name: str, simple=True) -> str:
+def preview_csv(p: Path, file_name: str, simple=True, submission_required: bool = True) -> str:
     """Generate a textual preview of a csv file
 
     Args:
@@ -72,17 +75,27 @@ def preview_csv(p: Path, file_name: str, simple=True) -> str:
     Returns:
         str: the textual preview
     """
-    df = pd.read_csv(p)
+    total_rows = max(0, get_file_len_size(p)[0] - 1)
+    df = read_csv_auto(p, nrows=CSV_PREVIEW_MAX_ROWS)
+    dialect = infer_csv_dialect(p)
 
     out = []
 
-    out.append(f"-> {file_name} has {df.shape[0]} rows and {df.shape[1]} columns.")
+    if total_rows > len(df):
+        out.append(
+            f"-> {file_name} has about {total_rows} rows and {df.shape[1]} columns "
+            f"(preview/statistics below use the first {len(df)} rows)."
+        )
+    else:
+        out.append(f"-> {file_name} has {df.shape[0]} rows and {df.shape[1]} columns.")
+    if dialect.inferred:
+        out.append(f"Detected CSV delimiter pattern: {dialect.reason}; parsed with sep={dialect.sep!r}.")
 
-    if "sample_submission" in file_name.lower() or "submission" in file_name.lower():
+    if submission_required and ("sample_submission" in file_name.lower() or "submission" in file_name.lower()):
         out.append("⚠️  IMPORTANT: This is the CORRECT submission format that must be followed!")
         out.append(f"The exact column names are: {', '.join(df.columns.tolist())}")
         out.append("Any description.md format information should be IGNORED if it conflicts with this file.")
-        
+
     if simple:
         cols = df.columns.tolist()
         sel_cols = 15
@@ -149,7 +162,7 @@ def preview_json(p: Path, file_name: str):
     )
 
 
-def generate(base_path, include_file_details=True, simple=False):
+def generate(base_path, include_file_details=True, simple=False, submission_required: bool = True):
     """Generate a textual preview of a directory (structure + file previews)."""
     tree = f"```\n{file_tree(base_path)}```"
     out = [tree]
@@ -159,7 +172,7 @@ def generate(base_path, include_file_details=True, simple=False):
             file_name = str(fn.relative_to(base_path))
 
             if fn.suffix == ".csv":
-                out.append(preview_csv(fn, file_name, simple=simple))
+                out.append(preview_csv(fn, file_name, simple=simple, submission_required=submission_required))
             elif fn.suffix == ".json":
                 out.append(preview_json(fn, file_name))
             elif fn.suffix in plaintext_files:
@@ -195,15 +208,18 @@ def generate(base_path, include_file_details=True, simple=False):
                 "This approach maximizes training data and often improves performance.\n"
                 "**Note**: If existing code already implements this strategy, i will skip this step.\n"
             )
-            
+
             out.append("\n".join(msg))
-            
+
     result = "\n\n".join(out)
 
     # if the result is very long we generate a simpler version
     if len(result) > 6_000 and not simple:
         return generate(
-            base_path, include_file_details=include_file_details, simple=True
+            base_path,
+            include_file_details=include_file_details,
+            simple=True,
+            submission_required=submission_required,
         )
     # if still too long, we truncate
     if len(result) > 6_000 and simple:
@@ -220,8 +236,9 @@ def clean_task_desc(task_desc: str, cfg) -> str:
     from llm import query
 
     acfg = cfg.agent
+    submission_required = getattr(acfg, "generate_submission", True)
 
-    prompt = {
+    system_prompt = {
         "Task": "Remove ONLY useless environment information from the task description below. Keep all core task content.",
         "Instructions": [
             "**What to REMOVE** (not related to the essence of the task):",
@@ -240,13 +257,13 @@ def clean_task_desc(task_desc: str, cfg) -> str:
             "",
             "**Output**: Return ONLY the cleaned task description text, no explanations."
         ],
-        "Task Description to Clean": task_desc
     }
+    user_prompt = f"# Task Description to Clean\n\n{task_desc}"
 
     try:
         cleaned_desc = query(
-            system_message=prompt,
-            user_message=None,
+            system_message=system_prompt,
+            user_message=user_prompt,
             model=acfg.code.model,
             temperature=0.0,
             cfg=cfg
@@ -257,6 +274,11 @@ def clean_task_desc(task_desc: str, cfg) -> str:
         logger.warning(f"Failed to clean task_desc with LLM: {e}. Using original.")
         cleaned_desc = task_desc
 
+    if not submission_required:
+        logger.info("Skipping sample_submission format injection because agent.generate_submission=false")
+        logger.info(f"Generating Task desc: \n  {cleaned_desc} \n")
+        return cleaned_desc
+
     input_dir = os.path.join(cfg.workspace_dir, "input")
     sample_submission_paths = [
         os.path.join(input_dir, "sample_submission.csv"),
@@ -266,7 +288,7 @@ def clean_task_desc(task_desc: str, cfg) -> str:
     for sample_path in sample_submission_paths:
         if os.path.exists(sample_path):
             try:
-                df = pd.read_csv(sample_path, nrows=5)
+                df = read_csv_auto(sample_path, nrows=5)
                 submission_format = "\n\n" + "=" * 60 + "\n"
                 submission_format += "**REQUIRED SUBMISSION FORMAT**\n"
                 submission_format += "=" * 60 + "\n"

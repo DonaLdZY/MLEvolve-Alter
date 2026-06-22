@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DESC_DIR = ""      # fill in the dataset directory path, e.g. "/path/to/datasets"
 OUTPUT_JSON = PROJECT_ROOT / "engine" / "coldstart" / "competition_tag_classified.json"
 
-CATEGORIES = ["General Image", "Detection", "Segmentation", "NLP", "Audio", "Others"]
+CATEGORIES = ["General Image", "Detection", "Segmentation", "NLP", "Audio", "Optimization", "Others"]
 
 SYSTEM_PROMPT = """You are a machine learning task classifier.
 Given a Kaggle competition's task name and description, classify it by calling the classify function.
@@ -26,7 +26,8 @@ Rules:
 - "Segmentation": image segmentation, pixel-level labeling, mask prediction tasks
 - "NLP": text classification, NER, QA, text generation, sentiment analysis, code understanding, or any text/language-based task
 - "Audio": audio classification, speech recognition, music tagging, sound event detection, or any audio-based task
-- "Others": tabular, time series, video, molecular, signal processing, recommendation, or anything not fitting above
+- "Optimization": scheduling, routing, assignment, resource allocation, portfolio/knapsack, combinatorial optimization, sequential decision-making, control, simulator/environment tasks, reinforcement learning, MDP, policy learning, reward-driven optimization
+- "Others": tabular prediction, time series forecasting, graph learning, video, molecular, signal processing, recommendation, or anything not fitting above and not primarily an optimization/decision task
 
 You MUST call the classify function with your answer."""
 

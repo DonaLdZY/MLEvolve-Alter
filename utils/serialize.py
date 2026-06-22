@@ -1,7 +1,10 @@
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Type, TypeVar
+import time
+import uuid
 
 import dataclasses_json
 
@@ -48,11 +51,32 @@ def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
 
 
 def dump_json(obj: dataclasses_json.DataClassJsonMixin, path: Path):
-    tmp_path = path.with_suffix(".json.tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     data = dumps_json(obj)
-    with open(tmp_path, "w") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(data)
-    tmp_path.replace(path)
+        f.flush()
+        os.fsync(f.fileno())
+    last_error: Exception | None = None
+    for attempt in range(8):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.08 * (attempt + 1))
+    try:
+        # Last-resort non-atomic overwrite. On Windows this is still safer than
+        # failing the whole search after journal data has been serialized.
+        path.write_text(data, encoding="utf-8")
+        tmp_path.unlink(missing_ok=True)
+        return
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        if last_error is not None:
+            raise last_error
+        raise
 
 
 G = TypeVar("G", bound=dataclasses_json.DataClassJsonMixin)

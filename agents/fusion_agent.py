@@ -13,6 +13,7 @@ from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from engine import solution_manager
 from agents.triggers import register_node
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -133,8 +134,19 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
     instructions = "\n# Instructions\n\n"
     instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
-    user_prompt = f"\n# Task description\n{prompt['Task description']}\n\n# Reference Solution\n{prompt['Reference Solution']}\n\n{instructions}"
-    assistant_prefix = f"Let me approach this systematically.\nFirst, I'll review the dataset:\n{agent.data_preview}\nMy current solution:\nPlan: {prompt['Current Solution']['Plan']}\nCode: {prompt['Current Solution']['Code']}\nPerformance: {prompt['Current Solution']['Performance']}\nAnalysis: {prompt['Current Solution']['Analysis']}\nI'll now analyze the reference solution and selectively incorporate its best ideas."
+    user_prompt = (
+        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{instructions}\n# Reference Solution\n{prompt['Reference Solution']}"
+    )
+    assistant_prefix = (
+        "Let me approach this systematically.\n"
+        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"My current solution:\nPlan: {prompt['Current Solution']['Plan']}\n"
+        f"Code: {prompt['Current Solution']['Code']}\n"
+        f"Performance: {prompt['Current Solution']['Performance']}\n"
+        f"Analysis: {prompt['Current Solution']['Analysis']}\n"
+        "I'll now analyze the reference solution and selectively incorporate its best ideas."
+    )
     prompt_complete = build_chat_prompt_for_model(agent.acfg.code.model, introduction, user_prompt, assistant_prefix)
 
     if agent.acfg.use_diff_mode:
@@ -275,8 +287,19 @@ def _fuse_with_multiple_references(
     instructions = "\n# Instructions\n\n"
     instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
-    user_prompt = f"\n# Task description\n{prompt['Task description']}\n\n# Reference Solutions\n{prompt['Reference Solutions']}\n\n{instructions}"
-    assistant_prefix = f"Let me approach this systematically.\nFirst, I'll review the dataset:\n{agent.data_preview}\nMy current solution:\nPlan: {prompt['Current Solution']['Plan']}\nCode: {prompt['Current Solution']['Code']}\nPerformance: {prompt['Current Solution']['Performance']}\nAnalysis: {prompt['Current Solution']['Analysis']}\nI'll now analyze the reference solutions and selectively incorporate the best ideas."
+    user_prompt = (
+        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{instructions}\n# Reference Solutions\n{prompt['Reference Solutions']}"
+    )
+    assistant_prefix = (
+        "Let me approach this systematically.\n"
+        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"My current solution:\nPlan: {prompt['Current Solution']['Plan']}\n"
+        f"Code: {prompt['Current Solution']['Code']}\n"
+        f"Performance: {prompt['Current Solution']['Performance']}\n"
+        f"Analysis: {prompt['Current Solution']['Analysis']}\n"
+        "I'll now analyze the reference solutions and selectively incorporate the best ideas."
+    )
     prompt_complete = build_chat_prompt_for_model(agent.acfg.code.model, introduction, user_prompt, assistant_prefix)
 
     if agent.acfg.use_diff_mode:
@@ -374,7 +397,7 @@ def _build_fusion_planner_suffix(prompt_base, data_preview, context):
     current = prompt_base.get("Current Solution", {})
     return (
         f"Let me approach this systematically.\n"
-        f"First, I'll review the dataset:\n{data_preview}\n"
+        f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
         f"My current solution:\n"
         f"Plan: {current.get('Plan', 'N/A')}\n"
         f"Code: {current.get('Code', 'N/A')}\n"
@@ -389,7 +412,7 @@ def _build_multi_fusion_planner_suffix(prompt_base, data_preview, context):
     current = prompt_base.get("Current Solution", {})
     return (
         f"Let me approach this systematically.\n"
-        f"First, I'll review the dataset:\n{data_preview}\n"
+        f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
         f"My current solution:\n"
         f"Plan: {current.get('Plan', 'N/A')}\n"
         f"Code: {current.get('Code', 'N/A')}\n"

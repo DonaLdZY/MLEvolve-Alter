@@ -1,0 +1,8 @@
+python run.py `
+  exp_id="carplay" `
+  data_dir="D:\Files\项目\AutoDecision\frontend\backend\runs\车流预测\autorealize" `
+  desc_file="D:\Files\项目\AutoDecision\frontend\backend\runs\车流预测\autorealize\description.md" `
+  exp_name="车流预测" `
+  use_grading_server=False `
+  log_dir="D:/MLEvolveRuns" `
+  workspace_dir="D:/MLEvolveRuns"

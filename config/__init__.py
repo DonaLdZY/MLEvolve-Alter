@@ -1,5 +1,6 @@
 """configuration and setup utils"""
 
+import os
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -34,6 +35,9 @@ class StageConfig:
     temp: float
     base_url: str
     api_key: str
+    enable_thinking: bool | None = None
+    reasoning_effort: str | None = None
+    max_tokens: int | None = None
 
 @dataclass
 class DecayConfig:
@@ -84,6 +88,7 @@ class AgentConfig:
     initial_drafts: int
     seed: int
     data_preview: bool
+    generate_submission: bool
     code: StageConfig
     feedback: StageConfig
     check_data_leakage: bool
@@ -92,6 +97,10 @@ class AgentConfig:
     max_fusion_drafts: int
     use_global_memory: bool
     memory_similarity_threshold: float
+    memory_embedding_backend: str
+    memory_embedding_api_key: str
+    memory_embedding_base_url: str
+    memory_embedding_model: str
     memory_embedding_device: str
     memory_embedding_model_path: str
     search: SearchConfig
@@ -119,7 +128,7 @@ class InitSolutionConfig:
 @dataclass
 class Config(Hashable):
     data_dir: Path
-    dataset_dir: Path
+    dataset_dir: Path | None
     desc_file: Path | None
 
     goal: str | None
@@ -145,8 +154,22 @@ class Config(Hashable):
 
     coldstart: ColdstartConfig
 
-    use_grading_server: bool = True
+    use_grading_server: bool = False
     init_solution: InitSolutionConfig = field(default_factory=InitSolutionConfig)
+
+
+def _normalize_model_base_url(model_name: str, base_url: str) -> str:
+    """Normalize provider URLs when a model family requires a specific endpoint."""
+    model_name = (model_name or "").strip().lower()
+    base_url = (base_url or "").strip()
+    if model_name.startswith("deepseek") and base_url in {
+        "https://api.deepseek.com",
+        "https://api.deepseek.com/",
+        "https://api.deepseek.com/v1",
+        "https://api.deepseek.com/v1/",
+    }:
+        return "https://api.deepseek.com/beta"
+    return base_url
 
 
 def _get_next_logindex(dir: Path) -> int:
@@ -193,27 +216,37 @@ def prep_cfg(cfg: Config):
 
     top_log_dir = Path(cfg.log_dir).resolve()
     top_workspace_dir = Path(cfg.workspace_dir).resolve()
+    resume_run = os.environ.get("MLEVOLVE_RESUME_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
     # generate experiment name and prefix with consecutive index
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    cfg.exp_name = f"{timestamp}_{cfg.exp_name or coolname.generate_slug(3)}"
-
-    # If log_dir and workspace_dir point to the same path, treat it as a unified
-    # "runs" root and place logs/workspace under the per-run directory
-    if top_log_dir == top_workspace_dir:
-        runs_root = top_log_dir
-        runs_root.mkdir(parents=True, exist_ok=True)
-        per_run_root = (runs_root / cfg.exp_name).resolve()
-        cfg.log_dir = (per_run_root / "logs").resolve()
-        cfg.workspace_dir = (per_run_root / "workspace").resolve()
+    if resume_run:
+        cfg.log_dir = top_log_dir
+        cfg.workspace_dir = top_workspace_dir
+        cfg.exp_name = cfg.exp_name or top_log_dir.name or coolname.generate_slug(3)
     else:
-        top_log_dir.mkdir(parents=True, exist_ok=True)
-        top_workspace_dir.mkdir(parents=True, exist_ok=True)
-        cfg.log_dir = (top_log_dir / cfg.exp_name).resolve()
-        cfg.workspace_dir = (top_workspace_dir / cfg.exp_name).resolve()
+        timestamp = os.environ.get("MLEVOLVE_RUN_TIMESTAMP", "").strip() or datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        cfg.exp_name = f"{timestamp}_{cfg.exp_name or coolname.generate_slug(3)}"
+
+        # If log_dir and workspace_dir point to the same path, treat it as a unified
+        # "runs" root and place logs/workspace under the per-run directory
+        if top_log_dir == top_workspace_dir:
+            runs_root = top_log_dir
+            runs_root.mkdir(parents=True, exist_ok=True)
+            per_run_root = (runs_root / cfg.exp_name).resolve()
+            cfg.log_dir = (per_run_root / "logs").resolve()
+            cfg.workspace_dir = (per_run_root / "workspace").resolve()
+        else:
+            top_log_dir.mkdir(parents=True, exist_ok=True)
+            top_workspace_dir.mkdir(parents=True, exist_ok=True)
+            cfg.log_dir = (top_log_dir / cfg.exp_name).resolve()
+            cfg.workspace_dir = (top_workspace_dir / cfg.exp_name).resolve()
 
     # validate the config
     cfg_schema: Config = OmegaConf.structured(Config)
     cfg = OmegaConf.merge(cfg_schema, cfg)
+
+    # Normalize model endpoints after schema merge so runtime clients see the right URL.
+    cfg.agent.code.base_url = _normalize_model_base_url(cfg.agent.code.model, cfg.agent.code.base_url)
+    cfg.agent.feedback.base_url = _normalize_model_base_url(cfg.agent.feedback.model, cfg.agent.feedback.base_url)
 
     return cast(Config, cfg)
 
@@ -250,13 +283,18 @@ def load_task_desc(cfg: Config):
 
 def prep_agent_workspace(cfg: Config):
     """Setup the agent's workspace and preprocess data if necessary."""
-    (cfg.workspace_dir / "input").mkdir(parents=True, exist_ok=True)
+    resume_run = os.environ.get("MLEVOLVE_RESUME_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+    input_dir = cfg.workspace_dir / "input"
+    input_dir.mkdir(parents=True, exist_ok=True)
     (cfg.workspace_dir / "working").mkdir(parents=True, exist_ok=True)
     (cfg.workspace_dir / "submission").mkdir(parents=True, exist_ok=True)
 
-    copytree(cfg.data_dir, cfg.workspace_dir / "input", use_symlinks=not cfg.copy_data)
-    if cfg.preprocess_data:
-        preproc_data(cfg.workspace_dir / "input")
+    if not (resume_run and any(input_dir.iterdir())):
+        copytree(cfg.data_dir, input_dir, use_symlinks=not cfg.copy_data)
+        if cfg.preprocess_data:
+            preproc_data(input_dir)
+    elif cfg.preprocess_data:
+        logger.info("Resume mode: reusing existing preprocessed workspace input.")
 
 
 def save_run(cfg: Config, journal):

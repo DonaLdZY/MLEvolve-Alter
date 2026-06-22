@@ -58,6 +58,11 @@ _NO_JSON_SCHEMA_PREFIXES = ("deepseek",)
 _THINKING_JSON_INCOMPATIBLE = ("qwen",)
 
 
+def is_deepseek_model(model_name: str) -> bool:
+    """Return True when the model belongs to the DeepSeek family."""
+    return (model_name or "").lower().startswith("deepseek")
+
+
 def thinking_json_incompatible(model_name: str) -> bool:
     """Return True for models that cannot use thinking + json_schema simultaneously."""
     name = (model_name or "").lower()

@@ -19,6 +19,7 @@ from agents.planner import run_planner, build_planner_task, build_planner_suffix
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from agents.triggers import register_node
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -197,8 +198,17 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if prompt.get("Memory", "").strip():
         memory_section = f"\n# Memory\nBelow is a record of previous improvement attempts and their outcomes:\n {prompt['Memory']}\n"
 
-    user_prompt = f"\n# Task description\n{prompt['Task description']}{memory_section}{prompt['Branch Evolution History']}\n\n{instructions}"
-    assistant_prefix = f"Let me approach this systematically.\nFirst, I'll review the dataset:\n{agent.data_preview}\nThe current solution uses the following code:\n{prompt['Previous solution']['Code']}\nIts output was:\n{output}\nBuilding on this and my evolution trajectory, I'll develop an improved approach."
+    user_prompt = (
+        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{instructions}{memory_section}{prompt['Branch Evolution History']}"
+    )
+    assistant_prefix = (
+        "Let me approach this systematically.\n"
+        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"The current solution uses the following code:\n{prompt['Previous solution']['Code']}\n"
+        f"Its output was:\n{output}\n"
+        "Building on this and my evolution trajectory, I'll develop an improved approach."
+    )
     prompt_complete = build_chat_prompt_for_model(agent.acfg.code.model, introduction, user_prompt, assistant_prefix)
 
     parent_node.add_expected_child_count()

@@ -22,6 +22,12 @@ from agents import (
 from engine import node_selection, evaluation, execution, solution_manager
 from engine.conditions import is_branch_stagnant
 from utils.data_preview import clean_task_desc
+from utils.autorealize_context import (
+    build_autorealize_context_md,
+    has_autorealize_context,
+    load_autorealize_description_md,
+    submission_required_from_context,
+)
 
 logger = logging.getLogger("MLEvolve")
 
@@ -38,16 +44,35 @@ class AgentSearch:
         self.cfg = cfg
         self.acfg = cfg.agent
         self.scfg = cfg.agent.search
-        self.task_desc = clean_task_desc(task_desc, cfg)
+        input_dir = cfg.workspace_dir / "input"
+        self.has_autorealize_package = has_autorealize_context(input_dir)
+        self.autorealize_context = build_autorealize_context_md(input_dir, write_context_file=True)
+        if self.has_autorealize_package and not str(self.autorealize_context or "").strip():
+            raise RuntimeError(
+                "AutoRealize package detected, but no prompt-ready automl_context.md was found. "
+                "AutoRealize must generate the complete MLEvolve context before AutoML starts."
+            )
+        self.has_autorealize_context = bool(str(self.autorealize_context or "").strip())
+        if self.has_autorealize_context:
+            self.task_desc = load_autorealize_description_md(input_dir, fallback=task_desc)
+            logger.info(
+                "[AgentSearch] AutoRealize context detected; using description.md as task_desc "
+                "and automl_context.md as the replacement data context."
+            )
+        else:
+            self.task_desc = clean_task_desc(task_desc, cfg)
+        context_submission_required = submission_required_from_context(input_dir)
+        if context_submission_required is False and getattr(self.acfg, "generate_submission", True):
+            self.acfg.generate_submission = False
+            logger.info("[AgentSearch] AutoRealize context disables mandatory submission.csv generation.")
+        elif context_submission_required is True and not getattr(self.acfg, "generate_submission", True):
+            logger.info("[AgentSearch] AutoRealize context indicates a submission contract, but config keeps generation disabled.")
         self.journal = journal
         self.data_preview: str | None = None
         self.current_step = 0
         self.current_node: SearchNode | None = None
         self.all_root = True
-        self.virtual_root = SearchNode(parent=None, plan="(root)", code="", metric=WorstMetricValue(),
-                                     stage="root")
         self.current_node_list = []
-        self.journal.append(self.virtual_root)
         self.best_metric: float = None
         self.best_node: SearchNode = None
         self.search_start_time = None
@@ -82,6 +107,7 @@ class AgentSearch:
         self.metric_maximize: bool | None = None
         self.metric_maximize_reasoning: str | None = None
         result_parse_agent.determine_metric_direction(self)
+        self.virtual_root = self._init_or_restore_journal_state()
 
         # Global memory
         self.global_memory = None
@@ -91,6 +117,10 @@ class AgentSearch:
                 memory_dir = str(self.cfg.workspace_dir / "global_memory")
                 self.global_memory = GlobalMemoryLayer(
                     memory_dir=memory_dir,
+                    embedding_backend=getattr(self.acfg, "memory_embedding_backend", "local"),
+                    embedding_api_key=getattr(self.acfg, "memory_embedding_api_key", ""),
+                    embedding_base_url=getattr(self.acfg, "memory_embedding_base_url", ""),
+                    embedding_model=getattr(self.acfg, "memory_embedding_model", ""),
                     embedding_model_path=self.acfg.memory_embedding_model_path,
                     embedding_device=self.acfg.memory_embedding_device,
                     similarity_threshold=self.acfg.memory_similarity_threshold,
@@ -104,6 +134,58 @@ class AgentSearch:
         else:
             logger.info("[AgentSearch] Global memory is disabled by config")
 
+    def _init_or_restore_journal_state(self) -> SearchNode:
+        """Initialize a new root or rebuild in-memory search state from a loaded journal."""
+        existing_roots = [
+            n for n in self.journal.nodes
+            if getattr(n, "stage", None) == "root" and getattr(n, "parent", None) is None
+        ]
+        if not existing_roots:
+            root = SearchNode(parent=None, plan="(root)", code="", metric=WorstMetricValue(), stage="root")
+            self.journal.append(root)
+            logger.info("[AgentSearch] Initialized a fresh search journal.")
+            return root
+
+        root = existing_roots[0]
+        restored_nodes = [n for n in self.journal.nodes if n is not root]
+        valid_nodes: list[SearchNode] = []
+
+        for node in restored_nodes:
+            branch_id = getattr(node, "branch_id", None)
+            if branch_id is not None:
+                self.branch_all_nodes.setdefault(branch_id, []).append(node)
+                self.branch_node_count[branch_id] = self.branch_node_count.get(branch_id, 0) + 1
+                try:
+                    self.next_branch_id = max(self.next_branch_id, int(branch_id) + 1)
+                except Exception:
+                    pass
+
+            metric = getattr(node, "metric", None)
+            has_metric = metric is not None and getattr(metric, "value", None) is not None
+            if node.is_buggy is False and has_metric and node.is_valid is not False:
+                valid_nodes.append(node)
+                self.current_node_list.append(node)
+                if branch_id is not None:
+                    self.branch_successful_nodes.setdefault(branch_id, []).append(node)
+
+        maximize = True if self.metric_maximize is None else self.metric_maximize
+        valid_nodes.sort(
+            key=lambda n: n.metric.value if (n.metric and n.metric.value is not None) else (float("-inf") if maximize else float("inf")),
+            reverse=maximize,
+        )
+        self.top_candidates = valid_nodes[: self.top_k]
+        if valid_nodes:
+            self.best_node = valid_nodes[0]
+            self.best_metric = self.best_node.metric.value
+
+        self.current_step = max(0, len(self.journal) - 1)
+        logger.info(
+            "[AgentSearch] Restored search journal: "
+            f"nodes={len(self.journal)}, completed={self.current_step}, "
+            f"branches={len(self.branch_all_nodes)}, best={self.best_metric}"
+        )
+        return root
+
     def _serialize_prompt(self, prompt_complete) -> str | None:
         """Serialize prompt (str or dict) to string for saving in node."""
         if prompt_complete is None:
@@ -116,7 +198,21 @@ class AgentSearch:
             return str(prompt_complete)
 
     def update_data_preview(self):
-        base_preview = data_preview.generate(self.cfg.workspace_dir)
+        if getattr(self, "has_autorealize_context", False):
+            self.data_preview = getattr(self, "autorealize_context", "") or ""
+            logger.info(
+                "[AgentSearch] Using AutoRealize automl_context as the sole data-preview context; "
+                "standalone MLEvolve preview generation is disabled for provider cache efficiency."
+            )
+            return
+        generate_submission = getattr(self.acfg, "generate_submission", True)
+        base_preview = data_preview.generate(
+            self.cfg.workspace_dir,
+            submission_required=generate_submission,
+        )
+        if not generate_submission:
+            self.data_preview = self._with_autorealize_context(base_preview)
+            return
         submission_format_warning = """
 
         ⚠️  CRITICAL SUBMISSION FORMAT NOTE:
@@ -124,10 +220,16 @@ class AgentSearch:
         - The column names in these files are the FINAL AUTHORITY for submission format
         - Always use the column names from the actual sample submission files
         """
-        self.data_preview = base_preview + submission_format_warning
+        self.data_preview = self._with_autorealize_context(base_preview + submission_format_warning)
+
+    def _with_autorealize_context(self, preview: str) -> str:
+        context = getattr(self, "autorealize_context", "") or ""
+        if not context:
+            return preview
+        return preview
 
     def is_root(self, node: SearchNode):
-        return node.id is self.virtual_root.id
+        return bool(node and node.id == self.virtual_root.id)
 
     def _run_single_step(
         self,

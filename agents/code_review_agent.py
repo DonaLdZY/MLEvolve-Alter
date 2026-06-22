@@ -8,6 +8,7 @@ from llm import FunctionSpec, query
 from engine.search_node import SearchNode
 from agents.prompts.validation_template_prompts import get_code_review_prompt
 from agents.prompts import get_internet_clarification
+from agents.prompt_cache import task_section
 
 from agents.coder.diff_coder import SearchReplacePatcher
 
@@ -66,6 +67,7 @@ def run(agent, node: SearchNode) -> str:
     prompt = get_code_review_prompt(
         task_desc=agent.task_desc,
         code=node.code,
+        submission_required=getattr(agent.acfg, "generate_submission", True),
     )
     internet_clarification = get_internet_clarification(getattr(agent.cfg, "pretrain_model_dir", ""))
     if "Instructions" not in prompt:
@@ -87,11 +89,18 @@ def run(agent, node: SearchNode) -> str:
             review_response = cast(
                 dict,
                 query(
-                    system_message=prompt,
-                    user_message=None,
+                    system_message={
+                        "Introduction": prompt.get("Introduction", ""),
+                        "Instructions": prompt.get("Instructions", {}),
+                    },
+                    user_message=(
+                        f"{task_section(agent.task_desc)}\n"
+                        f"# Code to review\n{prompt.get('Code to review', '')}"
+                    ),
                     func_spec=CODE_REVIEW_SPEC,
                     model=agent.acfg.code.model,
                     temperature=agent.acfg.code.temp,
+                    stage_name="code",
                     cfg=agent.cfg
                 ),
             )

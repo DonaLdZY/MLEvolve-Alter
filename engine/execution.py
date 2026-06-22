@@ -1,7 +1,9 @@
 """Post-execution validation: validate_executed_node (csv existence, metric=0.0, register success)."""
 
 import logging
+import re
 
+from engine.model_artifacts import find_model_artifacts
 from engine.search_node import SearchNode
 from utils.metric import WorstMetricValue
 
@@ -23,12 +25,40 @@ def validate_executed_node(agent, node: SearchNode):
     if node.is_buggy:
         return
 
-    submission_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
-    if not submission_path.exists():
+    if not re.search(
+        r"def\s+predict\s*\(\s*model_path(?:\s*:\s*[^,)=]+)?(?:\s*=\s*[^,)]*)?\s*,\s*data(?:\s*:\s*[^,)=]+)?(?:\s*=\s*[^,)]*)?\s*[,)]",
+        node.code or "",
+    ):
         node.is_buggy = True
         node.metric = WorstMetricValue()
-        logger.info(f"Node {node.id} did not produce a submission.csv")
+        node.analysis = (
+            "The solution did not expose the required reusable inference API: "
+            "`predict(model_path, data)`. Successful MLEvolve nodes must save a "
+            "model artifact and provide this function so the best_solution can be reused."
+        )
+        logger.info(f"Node {node.id} did not define predict(model_path, data)")
         return
+
+    model_artifacts = find_model_artifacts(agent.cfg.workspace_dir, str(node.id))
+    if not model_artifacts:
+        node.is_buggy = True
+        node.metric = WorstMetricValue()
+        node.analysis = (
+            "The solution did not save a node-specific model artifact under ./working, "
+            "./models, ./artifacts, or ./checkpoints. Save the trained model and any "
+            "required preprocessing state to a file such as `./working/model_artifact.pkl` "
+            "or `./working/best_model.pt`, then load it inside `predict(model_path, data)`."
+        )
+        logger.info(f"Node {node.id} did not produce a model artifact")
+        return
+
+    if getattr(agent.acfg, "generate_submission", True):
+        submission_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
+        if not submission_path.exists():
+            node.is_buggy = True
+            node.metric = WorstMetricValue()
+            logger.info(f"Node {node.id} did not produce a submission.csv")
+            return
 
     if node.metric.maximize and node.metric.value == 0.0:
         node.is_buggy = True

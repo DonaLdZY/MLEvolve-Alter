@@ -7,12 +7,11 @@ SERVER_ID=${1:-111}
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
-dataset_dir=${DATASET_DIR:?Please set DATASET_DIR env var to the mle-bench data root}
+dataset_dir=${DATASET_DIR:?Please set DATASET_DIR env var to the mle-bench data root before launching the grading server}
 
 BASE_PORT=5005
 PORT=$((BASE_PORT + SERVER_ID))
 
-# Ensure the log directory exists
 GRADING_SERVERS_DIR="grading_servers"
 mkdir -p "${GRADING_SERVERS_DIR}"
 

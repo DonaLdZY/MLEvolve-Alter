@@ -6,6 +6,7 @@ from typing import cast
 from llm import FunctionSpec, query
 from engine.search_node import SearchNode
 from utils.response import wrap_code
+from agents.prompt_cache import task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -84,11 +85,17 @@ def run(agent, node: SearchNode) -> dict:
         response = cast(
             dict,
             query(
-                system_message=prompt,
-                user_message=None,
+                system_message={"Introduction": introduction},
+                user_message=(
+                    f"{task_section(agent.task_desc)}\n"
+                    f"# Implementation\n{prompt['Implementation']}\n\n"
+                    f"# Execution output\n{prompt['Execution output']}\n\n"
+                    f"# Validation metric\n{prompt['Validation metric']}"
+                ),
                 func_spec=DATA_LEAKAGE_CHECK_SPEC,
                 model=agent.acfg.feedback.model,
                 temperature=agent.acfg.feedback.temp,
+                stage_name="feedback",
                 cfg=agent.cfg
             ),
         )

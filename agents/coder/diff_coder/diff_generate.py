@@ -19,6 +19,7 @@ from typing import Dict, Any, Tuple, Union
 from llm import generate
 from .prompts import build_base_diff_instructions, build_diff_format_suffix, DIFF_SYS_FORMAT
 from .apply import apply_diff_with_retry, format_planning_result_for_plan
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -49,14 +50,15 @@ def diff_generate_and_apply(
         f"Response format: {DIFF_SYS_FORMAT}"
     )
 
-    user_prompt_parts = [f"\n# Improvement Plan\n\n{plan_text}\n"]
+    task_desc = getattr(agent_instance, "task_desc", "")
+    user_prompt_parts = [task_section(task_desc, data_preview), f"\n{diff_instructions}\n"]
+    user_prompt_parts.append(f"\n# Improvement Plan\n\n{plan_text}\n")
     if extra_user_sections:
         user_prompt_parts.append(f"\n{extra_user_sections}\n")
-    user_prompt_parts.append(f"\n{diff_instructions}\n")
     user_prompt = "".join(user_prompt_parts)
 
     assistant_text = _build_assistant_text(
-        data_preview, parent_code, execution_output, extra_context,
+        data_preview, parent_code, execution_output, extra_context, task_desc,
     )
 
     diff_prompt = _build_diff_model_prompt(model_name, introduction, user_prompt, assistant_text)
@@ -70,16 +72,16 @@ def diff_generate_and_apply(
 
     def regenerate_fn(current_code: str, retry_note: str) -> str:
         new_assistant = _build_assistant_text(
-            data_preview, current_code, execution_output, extra_context,
+            data_preview, current_code, execution_output, extra_context, task_desc,
         )
         new_prompt = _build_diff_model_prompt(
             model_name, introduction, user_prompt, new_assistant,
         )
         if retry_note:
             if isinstance(new_prompt, dict) and "user" in new_prompt:
-                new_prompt["user"] = retry_note + "\n\n" + new_prompt["user"]
+                new_prompt["user"] = new_prompt["user"] + "\n\n# Retry Note\n" + retry_note
             elif isinstance(new_prompt, str):
-                new_prompt = retry_note + "\n\n" + new_prompt
+                new_prompt = new_prompt + "\n\n# Retry Note\n" + retry_note
         return generate(
             prompt=new_prompt,
             temperature=agent_instance.acfg.code.temp,
@@ -133,13 +135,14 @@ def _build_assistant_text(
     code: str,
     execution_output: str,
     extra_context: str = "",
+    task_desc: str = "",
 ) -> str:
     wrapped_code = f"```python\n{code}\n```"
     wrapped_output = f"```\n{execution_output or '[No execution output provided]'}\n```"
 
     parts = [
         "Let me approach this systematically.",
-        f"First, I'll examine the dataset:\n{data_preview}",
+        dataset_reference_sentence(task_desc, data_preview),
         f"According to the improvement plan provided above, I will implement the specified enhancements "
         f"to improve test set performance.",
         f"Regarding this task, I previously made attempts with the following code:\n{wrapped_code}",

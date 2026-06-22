@@ -2,28 +2,28 @@
   <img src="assets/logo.svg" alt="MLEvolve" width="400"/>
 </p>
 
-🌐 **Project Page**: https://internscience.github.io/MLEvolve/
+馃寪 **Project Page**: https://internscience.github.io/MLEvolve/
 
 An agentic MLE (Machine Learning Engineering) system that automatically solves Kaggle-style ML competitions through Monte Carlo Graph Search (MCGS) with multi-agent collaboration. This is an advanced version based on [AutoMLGen](https://arxiv.org/abs/2510.08511). MLEvolve achieves **#1 on the [MLE-bench](https://github.com/openai/mle-bench) leaderboard** with **only 12 hours** of runtime.
 
 ## Timeline
 
-- **2026-03-23** — Now supports OpenAI-compatible APIs (GPT, Qwen, DeepSeek, etc.). Models with function calling support are recommended for best performance.
-- **2026-02-14** — MLEvolve codebase is now open-source.
-- **2026-02-14** — MLEvolve achieves **#1 on MLE-bench** (12-hour budget).
+- **2026-03-23** 鈥+/-Now supports OpenAI-compatible APIs (GPT, Qwen, DeepSeek, etc.). Models with function calling support are recommended for best performance.
+- **2026-02-14** 鈥+/-MLEvolve codebase is now open-source.
+- **2026-02-14** 鈥+/-MLEvolve achieves **#1 on MLE-bench** (12-hour budget).
 
 
 ## MLE-bench Results
 
-Performance on the [MLE-bench](https://github.com/openai/mle-bench) leaderboard (Any Medal %, mean ± SEM):
+Performance on the [MLE-bench](https://github.com/openai/mle-bench) leaderboard (Any Medal %, mean 卤 SEM):
 
 | Rank | Agent | LLM | Low (%) | Medium (%) | High (%) | All (%) | Time (h) |
 |------|-------|-----|---------|------------|----------|---------|----------|
-| 1 | **MLEvolve (Ours)** | Gemini-3-Pro-Preview | **80.30 ± 1.52** | 57.89 ± 1.52 | **42.22 ± 2.22** | **61.33 ± 1.33** | 12 |
-| 2 | PiEvolve | Gemini-3-Pro-Preview | **80.30 ± 1.52** | **58.77 ± 0.88** | 40.00 ± 0.00 | **61.33 ± 0.77** | 24 |
-| 3 | Famou-Agent 2.0 | Gemini-2.5-Pro | 75.76 ± 1.52 | 57.89 ± 1.52 | 40.00 ± 0.00 | 59.56 ± 0.89 | 24 |
-| 4 | ML-Master 2.0 | Deepseek-V3.2-Speciale | 75.76 ± 1.51 | 50.88 ± 3.51 | **42.22 ± 2.22** | 56.44 ± 2.47 | 24 |
-| 5 | PiEvolve | Gemini-3-Pro-Preview | 74.24 ± 3.03 | 45.61 ± 0.88 | 35.55 ± 2.22 | 52.00 ± 0.77 | 12 |
+| 1 | **MLEvolve (Ours)** | Gemini-3-Pro-Preview | **80.30 卤 1.52** | 57.89 卤 1.52 | **42.22 卤 2.22** | **61.33 卤 1.33** | 12 |
+| 2 | PiEvolve | Gemini-3-Pro-Preview | **80.30 卤 1.52** | **58.77 卤 0.88** | 40.00 卤 0.00 | **61.33 卤 0.77** | 24 |
+| 3 | Famou-Agent 2.0 | Gemini-2.5-Pro | 75.76 卤 1.52 | 57.89 卤 1.52 | 40.00 卤 0.00 | 59.56 卤 0.89 | 24 |
+| 4 | ML-Master 2.0 | Deepseek-V3.2-Speciale | 75.76 卤 1.51 | 50.88 卤 3.51 | **42.22 卤 2.22** | 56.44 卤 2.47 | 24 |
+| 5 | PiEvolve | Gemini-3-Pro-Preview | 74.24 卤 3.03 | 45.61 卤 0.88 | 35.55 卤 2.22 | 52.00 卤 0.77 | 12 |
 
 
 ## Coding Module in AI-Scientist
@@ -33,17 +33,17 @@ MLEvolve powers the **coding and algorithm optimization** module within the [Int
 
 ## Key Technical Contributions
 
-**Multi-Mode Planning & Code Generation** — Supports base (single-shot) and memory-enhanced (two-stage retrieval-augmented) planning, paired with three code generation strategies: single-pass, stepwise multi-agent pipeline, and incremental SEARCH/REPLACE diff patching. Different modes are dispatched adaptively based on search state.
+**Multi-Mode Planning & Code Generation** 鈥+/-Supports base (single-shot) and memory-enhanced (two-stage retrieval-augmented) planning, paired with three code generation strategies: single-pass, stepwise multi-agent pipeline, and incremental SEARCH/REPLACE diff patching. Different modes are dispatched adaptively based on search state.
 
-**Experience-Driven Memory** — A global memory layer records plan, code, metrics, and success/failure labels for every node. Retrieval combines BM25 + FAISS allowing the planner to reinforce proven strategies and avoid known pitfalls from its own search history. Different agents query memory in different ways to encourage novel approaches.
+**Experience-Driven Memory** 鈥+/-A global memory layer records plan, code, metrics, and success/failure labels for every node. Retrieval combines BM25 + FAISS allowing the planner to reinforce proven strategies and avoid known pitfalls from its own search history. Different agents query memory in different ways to encourage novel approaches.
 
-**Progressive MCGS with Cross-Branch Fusion** — The search graph extends vanilla UCT with piecewise exploration decay, time-aware explore-exploit switching, and automatic stagnation detection. Multiple solution branches evolve in parallel; when progress stalls, the system performs cross-branch fusion — merging insights from top-performing nodes across different branches into new solution candidates — and trajectory-aware evolution that leverages each branch's full improvement history to propose informed next steps.
+**Progressive MCGS with Cross-Branch Fusion** 鈥+/-The search graph extends vanilla UCT with piecewise exploration decay, time-aware explore-exploit switching, and automatic stagnation detection. Multiple solution branches evolve in parallel; when progress stalls, the system performs cross-branch fusion 鈥+/-merging insights from top-performing nodes across different branches into new solution candidates 鈥+/-and trajectory-aware evolution that leverages each branch's full improvement history to propose informed next steps.
 
 
 
 ## Setup
 
-**1. Prepare mle-bench** — Install [mle-bench](https://github.com/openai/mle-bench) and download the dataset following its instructions.
+**1. Prepare mle-bench** 鈥+/-Install [mle-bench](https://github.com/openai/mle-bench) and download the dataset following its instructions.
 
 **2. Install MLEvolve dependencies**
 
@@ -53,7 +53,7 @@ pip install --no-deps -r requirements_ml.txt
 pip install --no-deps -r requirements_domain.txt  
 ```
 
-**3. Configure** — Edit `config/config.yaml`, fields you **must** fill in:
+**3. Configure** 鈥+/-Edit `config/config.yaml`, fields you **must** fill in:
 
 ```yaml
 dataset_dir: "/path/to/mle-bench/data"
@@ -62,14 +62,31 @@ agent:
   code:
     base_url: "https://your-gemini-endpoint"
     api_key: "your-api-key"
+    enable_thinking: null
+    reasoning_effort: null
   feedback:
     base_url: "https://your-gemini-endpoint"
     api_key: "your-api-key"
+    enable_thinking: null
+    reasoning_effort: null
 ```
 
-Other tunable fields (`agent.steps`, `agent.time_limit`, etc.) have sensible defaults — see comments in the yaml file.
+Other tunable fields (`agent.steps`, `agent.time_limit`, etc.) have sensible defaults 鈥+/-see comments in the yaml file.
+
+`agent.code.enable_thinking` and `agent.feedback.enable_thinking` support quick testing:
+- `null`: automatic behavior (default)
+- `true`: force-enable thinking when the backend supports it
+- `false`: force-disable thinking when the backend supports it
+
+`agent.code.reasoning_effort` and `agent.feedback.reasoning_effort` optionally control thinking strength:
+- `null`: do not pass the provider-specific parameter; provider/API default applies
+- supported config values: `low`, `medium`, `high`, `xhigh`
+- mapped per backend when supported (for example DeepSeek `reasoning_effort`, Gemini `thinking_level`)
+- for DeepSeek, `low`/`medium` map to `high`, and `xhigh` maps to `max` to match provider behavior
 
 If `agent.use_global_memory: True`, you must also set `agent.memory_embedding_model_path` to a valid HuggingFace embedding model name or local model path. Set `agent.memory_embedding_device` to `cpu` if CUDA is unavailable.
+
+If `agent.use_global_memory: True`, set `agent.memory_embedding_backend` to `local` for HuggingFace/local models, or `openai`/`azure`/`custom` for remote embedding APIs. For remote backends, fill `agent.memory_embedding_api_key`, `agent.memory_embedding_base_url`, and `agent.memory_embedding_model`.
 
 ### Cold-Start Models (optional)
 

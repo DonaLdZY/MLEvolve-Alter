@@ -77,6 +77,44 @@ class Interpreter:
         self._procs_lock = threading.Lock()
         self._active_procs: dict[int, subprocess.Popen] = {}
 
+    def _available_cpus(self) -> list[int]:
+        """Return the CPU ids available to this process on the current platform."""
+        if hasattr(os, "sched_getaffinity"):
+            return sorted(os.sched_getaffinity(0))
+
+        total_cpus = os.cpu_count() or self.cpu_number or 1
+        start = max(0, self.start_cpu_id)
+        end = min(total_cpus, start + max(1, self.cpu_number))
+        cpus = list(range(start, end))
+        return cpus or list(range(total_cpus))
+
+    def _build_affinity_pre_code(self, cpu_set: set[int]) -> str:
+        """Build cross-platform best-effort CPU affinity setup code for the child process."""
+        if not cpu_set:
+            return ""
+
+        cpu_list = sorted(cpu_set)
+        if hasattr(os, "sched_setaffinity"):
+            return (
+                "import os\n"
+                "try:\n"
+                f"    os.sched_setaffinity(0, {cpu_list})\n"
+                "except Exception:\n"
+                "    pass\n"
+            )
+
+        if sys.platform == "win32":
+            return (
+                "import os\n"
+                "try:\n"
+                "    import psutil\n"
+                f"    psutil.Process(os.getpid()).cpu_affinity({cpu_list})\n"
+                "except Exception:\n"
+                "    pass\n"
+            )
+
+        return ""
+
     def terminate_all_subprocesses(self) -> None:
         """Terminate all active subprocesses (for graceful Ctrl+C exit)."""
         with self._procs_lock:
@@ -118,24 +156,63 @@ class Interpreter:
     
     def isolate_model_path(self, code, _id):
         """Replace generic model filenames in code to avoid multi-process conflicts."""
-        if '.pth' not in code and '.bin' not in code and '.pt' not in code:
+        model_exts = (
+            ".pth",
+            ".bin",
+            ".pt",
+            ".pkl",
+            ".pickle",
+            ".joblib",
+            ".onnx",
+            ".safetensors",
+            ".model",
+            ".cbm",
+            ".bst",
+            ".ubj",
+            ".npz",
+            ".txt",
+        )
+        if not any(ext in code for ext in model_exts):
             return code
 
         modified_code = code
 
         generic_model_names = [
+            "model_artifact.pkl",
+            "model_artifact.joblib",
+            "model_artifact.pt",
+            "model_artifact.pth",
             "best_model.pth",
             "best_model.bin",
             "best_model.pt",
+            "best_model.pkl",
+            "best_model.joblib",
+            "best_model.onnx",
+            "best_model.safetensors",
             "model_best.pth",
             "model_best.bin",
             "model_best.pt",
+            "model_best.pkl",
+            "model_best.joblib",
             "model.pth",
             "model.pt",
             "model.bin",
+            "model.pkl",
+            "model.joblib",
+            "model.onnx",
+            "model.safetensors",
             "checkpoint.pth",
             "checkpoint.pt",
             "checkpoint.bin",
+            "checkpoint.pkl",
+            "checkpoint.joblib",
+            "checkpoint.safetensors",
+            "xgb_model.json",
+            "xgb_model.ubj",
+            "xgb_model.model",
+            "lgb_model.txt",
+            "lgb_model.pkl",
+            "catboost_model.cbm",
         ]
 
         generic_model_names.sort(key=len, reverse=True)
@@ -148,6 +225,7 @@ class Interpreter:
             new_filename = f"{name}_{_id}.{ext}"
 
             modified_code = modified_code.replace(f"/{filename}", f"/{new_filename}")
+            modified_code = modified_code.replace(f"\\{filename}", f"\\{new_filename}")
             modified_code = modified_code.replace(f'"{filename}"', f'"{new_filename}"')
             modified_code = modified_code.replace(f"'{filename}'", f"'{new_filename}'")
 
@@ -198,13 +276,18 @@ class Interpreter:
         
         try:
             cpu_number_per_session = max(1, int(self.cpu_number / self.max_parallel_run))
-            avail_cpus = sorted(os.sched_getaffinity(0))
+            avail_cpus = self._available_cpus()
             start = process_id * cpu_number_per_session
             cpu_set = set(avail_cpus[start:start + cpu_number_per_session])
             if not cpu_set:
                 cpu_set = set(avail_cpus)
-            logger.info(f"has set process_id:{process_id} to use cpu: {cpu_set}")
-            pre_code = "import os\nos.sched_setaffinity(0, {cpu_set})\n".format(cpu_set=cpu_set)
+            pre_code = self._build_affinity_pre_code(cpu_set)
+            if pre_code:
+                logger.info(f"Set process_id:{process_id} to prefer cpu: {cpu_set}")
+            else:
+                logger.info(
+                    f"CPU affinity is unavailable on this platform, continuing without pinning for process_id:{process_id}"
+                )
 
             code = self.isolate_submission_path(code=code, _id=id)
             code = self.isolate_model_path(code=code, _id=id)
@@ -384,5 +467,3 @@ class Interpreter:
                 if process_id is not None:
                     self.status_map[process_id] = 0
                     self.current_parallel_run -= 1
-
-

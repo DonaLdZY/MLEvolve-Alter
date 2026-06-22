@@ -17,22 +17,43 @@ from typing import Dict, Any, Union
 
 from llm import generate, compile_prompt_to_md
 from llm.model_profiles import thinking_json_incompatible
+from agents.prompts.shared import is_optimization_or_rl_task
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
 
 # ============ Planning constants ============
 
-PLANNING_ALLOWED_MODULES = [
+BASE_PLANNING_ALLOWED_MODULES = [
     "data_processing_and_feature_engineering",
     "model_design",
     "training_evaluation",
 ]
+RL_PLANNING_MODULES = ["rl_environment_design"]
+PLANNING_ALLOWED_MODULES = BASE_PLANNING_ALLOWED_MODULES + RL_PLANNING_MODULES
 
-PLANNING_JSON_FORMAT = f"""{{
+
+def get_planning_allowed_modules(
+    agent_instance=None,
+    task_desc: str = "",
+    coldstart_description: str = "",
+) -> list[str]:
+    """Return planner modules, adding RL environment design only for optimization/RL tasks."""
+    if agent_instance is not None:
+        task_desc = task_desc or getattr(agent_instance, "task_desc", "")
+        coldstart_description = coldstart_description or getattr(agent_instance, "coldstart_description", "")
+    if is_optimization_or_rl_task(task_desc, coldstart_description):
+        return PLANNING_ALLOWED_MODULES
+    return BASE_PLANNING_ALLOWED_MODULES.copy()
+
+
+def build_planning_json_format(allowed_modules: list[str] | None = None) -> str:
+    allowed_modules = allowed_modules or PLANNING_ALLOWED_MODULES
+    return f"""{{
   "reason": "The reason why you chose these components to modify. Based on the current status and execution results: 1) why these components are the most promising ones to focus on, 2) why these components are the right places to apply your modifications.",
   "module": ["module_name_from_allowed_list"],
-  // CRITICAL: "module" must be an array (1-3 elements). Each element must be from: [{', '.join([f"'{m}'" for m in PLANNING_ALLOWED_MODULES])}]
+  // CRITICAL: "module" must be an array (1-3 elements). Each element must be from: [{', '.join([f"'{m}'" for m in allowed_modules])}]
   // Choose 1-3 modules based on actual analysis, not from this example
   "plan": {{
     "module_name_from_allowed_list": "Detailed modification plan for this module: 1) what to change, 2) how to change it, 3) expected results..."
@@ -40,46 +61,54 @@ PLANNING_JSON_FORMAT = f"""{{
   // CRITICAL: Keys in "plan" MUST be exactly the same as module names in the "module" array
 }}"""
 
-PLANNING_JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "reason": {
-            "type": "string",
-            "description": "The reason why you chose these components to modify. Based on the current status and execution results: 1) why these components are the most promising ones to focus on, 2) why these components are the right places to apply your modifications. Should be 1-4 sentences including root cause analysis."
-        },
-        "module": {
-            "type": "array",
-            "items": {
+PLANNING_JSON_FORMAT = build_planning_json_format(PLANNING_ALLOWED_MODULES)
+
+
+def build_planning_json_schema(allowed_modules: list[str] | None = None) -> dict:
+    allowed_modules = allowed_modules or PLANNING_ALLOWED_MODULES
+    return {
+        "type": "object",
+        "properties": {
+            "reason": {
                 "type": "string",
-                "enum": PLANNING_ALLOWED_MODULES
+                "description": "The reason why you chose these components to modify. Based on the current status and execution results: 1) why these components are the most promising ones to focus on, 2) why these components are the right places to apply your modifications. Should be 1-4 sentences including root cause analysis."
             },
-            "description": f"An array of 1-3 module names to modify. Each element MUST be one of: {', '.join(PLANNING_ALLOWED_MODULES)}. Choose 1-3 modules based on actual analysis, not from examples.",
-            "minItems": 1,
-            "maxItems": 3
+            "module": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": allowed_modules
+                },
+                "description": f"An array of 1-3 module names to modify. Each element MUST be one of: {', '.join(allowed_modules)}. Choose 1-3 modules based on actual analysis, not from examples.",
+                "minItems": 1,
+                "maxItems": 3
+            },
+            "plan": {
+                "type": "object",
+                "title": "Module Modification Plans",
+                "description": "A JSON object where keys are module names (must match exactly with names in the 'module' array) and values are detailed modification plan strings. CRITICAL REQUIREMENT: For EVERY module name listed in the 'module' array, you MUST create a corresponding key-value pair in this 'plan' object. The number of keys in 'plan' MUST equal the number of elements in 'module'. Each value must be a non-empty string containing the modification plan.",
+                "additionalProperties": {
+                    "type": "string",
+                    "title": "Modification Plan",
+                    "description": "A detailed modification plan (2-5 sentences) as a string. Must include: 1) WHAT to change (specific technical modification with category), 2) WHY this change (root cause analysis, why THIS TASK needs it), 3) HOW to implement (specific implementation approach), 4) Interface constraints (variable names, function signatures to preserve). Maintain existing variable names to ensure compatibility with other components. This string must not be empty."
+                },
+                "required": []
+            }
         },
-        "plan": {
-            "type": "object",
-            "title": "Module Modification Plans",
-            "description": "A JSON object where keys are module names (must match exactly with names in the 'module' array) and values are detailed modification plan strings. CRITICAL REQUIREMENT: For EVERY module name listed in the 'module' array, you MUST create a corresponding key-value pair in this 'plan' object. The number of keys in 'plan' MUST equal the number of elements in 'module'. Each value must be a non-empty string containing the modification plan.",
-            "additionalProperties": {
-                "type": "string",
-                "title": "Modification Plan",
-                "description": "A detailed modification plan (2-5 sentences) as a string. Must include: 1) WHAT to change (specific technical modification with category), 2) WHY this change (root cause analysis, why THIS TASK needs it), 3) HOW to implement (specific implementation approach), 4) Interface constraints (variable names, function signatures to preserve). Maintain existing variable names to ensure compatibility with other components. This string must not be empty."
-            },
-            "required": []
-        }
-    },
-    "required": ["reason", "module", "plan"],
-    "additionalProperties": False
-}
+        "required": ["reason", "module", "plan"],
+        "additionalProperties": False
+    }
+
+
+PLANNING_JSON_SCHEMA = build_planning_json_schema(PLANNING_ALLOWED_MODULES)
 
 
 # ============ Component descriptions ============
 
 def get_component_descriptions() -> Dict[str, str]:
-    """Get module name → description mapping from StepAgent definitions."""
+    """Get module name to description mapping from StepAgent definitions."""
     from agents.coder.stepwise_coder import create_default_step_agents  # lazy to avoid circular import
-    step_agents = create_default_step_agents()
+    step_agents = create_default_step_agents(include_rl=True)
     return {agent.name: agent.description for agent in step_agents}
 
 
@@ -256,7 +285,7 @@ def build_planner_suffix(
 
     suffix = (
         f"Let me approach this systematically.\n"
-        f"First, I'll examine the dataset:\n{data_preview}\n"
+        f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
         f"Regarding this task, I previously made attempts with the following code:\n{code}\n"
         f"The execution of this code yielded the following results:\n{wrap_code(execution_output, lang='')}\n"
     )
@@ -279,7 +308,12 @@ def run_planner(
     max_retries: int = 3,
     stage_name: str = "Planning",
 ) -> Dict[str, Any]:
-    component_descriptions = get_component_descriptions()
+    allowed_modules = get_planning_allowed_modules(agent_instance=agent_instance)
+    component_descriptions = {
+        name: desc
+        for name, desc in get_component_descriptions().items()
+        if name in allowed_modules
+    }
     component_desc_parts = [f"- **{name}**: {desc}" for name, desc in component_descriptions.items()]
     component_desc_text = "\n".join(component_desc_parts)
 
@@ -290,11 +324,11 @@ def run_planner(
         "**CRITICAL: You must output your analysis in JSON format only (no additional text).**",
         "",
         "Output format:",
-        PLANNING_JSON_FORMAT,
+        build_planning_json_format(allowed_modules),
         "",
         "**CRITICAL Requirements:**",
         f"- `reason`: 1-4 sentences explaining why these components are the best targets now, including root cause analysis.",
-        f"- `module`: An **array** of module names. Each element **MUST be one of**: {', '.join([repr(m) for m in PLANNING_ALLOWED_MODULES])}",
+        f"- `module`: An **array** of module names. Each element **MUST be one of**: {', '.join([repr(m) for m in allowed_modules])}",
         "- `plan`: An object where:",
         "    * Keys **MUST be exactly the same** as module names in the `module` array",
         "    * Values are **detailed modification plans** (2-5 sentences) following the scientific approach structure:",
@@ -317,7 +351,9 @@ def run_planner(
         memory_section = f"# Memory\nBelow is a record of previous improvement attempts and their outcomes:\n {memory_text}"
 
     user_prompt_parts = [
-        f"\n# Task description\n{planning_prompt_dict['Task description']}\n",
+        task_section(planning_prompt_dict["Task description"], data_preview),
+        f"# Available Components\n{component_desc_text}\n\n",
+        f"{instructions}\n\n",
         f"{memory_section}\n" if memory_section else "",
     ]
     if extra_prompt_sections:
@@ -326,8 +362,6 @@ def run_planner(
                 user_prompt_parts.append(f"{section_text}\n")
 
     user_prompt_parts.extend([
-        f"# Available Components\n{component_desc_text}\n\n",
-        f"{instructions}\n\n",
         f"{your_task_section}",
     ])
     user_prompt = "".join(user_prompt_parts)
@@ -344,7 +378,7 @@ def run_planner(
     for attempt in range(max_retries):
         logger.info(f"Calling {stage_name} Agent to analyze which modules to modify... (attempt {attempt + 1}/{max_retries})")
 
-        json_schema = PLANNING_JSON_SCHEMA
+        json_schema = build_planning_json_schema(allowed_modules)
 
         planning_response = generate(
             prompt=planning_prompt_complete,

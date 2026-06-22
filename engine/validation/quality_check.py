@@ -18,7 +18,7 @@ def submission_format_fix_prompt(
     submission_path: Path,
     sample_path: Path | None = None,
     head_rows: int = 20,
-) -> str | None:
+) -> str | dict[str, str] | None:
     """Build prompt for LLM to suggest submission column renames. Returns None if column count differs or names match; does not call LLM or modify files."""
     import numpy as np
 
@@ -77,27 +77,18 @@ def submission_format_fix_prompt(
             preview_str = preview_df.to_string(index=False)
             return f"### {title}\n```\n{preview_str}\n```\n"
 
-        prompt_parts = []
-
-        prompt_parts.append(
-            "You are a data format fixer. Compare the two CSV files below and determine which sample_submission column name should be assigned to each current submission column."
-            " Do not change the data order; you may only rename columns list. You must response with Response Format "
-        )
-
-        prompt_parts.append(_format_preview(sample_df, "Sample Submission (standard format, first 20 rows)"))
-        prompt_parts.append(_format_preview(submission_df, "Current Submission (to fix, first 20 rows)"))
-
-        prompt_parts.append(
-            "## Instructions\n"
-            "- The goal is to repair the current submission header so it exactly uses the sample_submission column names.\n"
-
-            f"Sample submission columns (gold order): {sample_cols}\n"
-            f"Current submission columns (current order): {submission_cols}\n\n"
+        system_prompt = (
+            "You are a data format fixer. Compare a standard sample_submission CSV "
+            "with a current submission CSV and determine which sample_submission "
+            "column name should be assigned to each current submission column.\n\n"
+            "Instructions:\n"
+            "- Repair only the current submission header so it exactly uses the sample_submission column names.\n"
+            "- Do not change data order; you may only rename the column list.\n"
             "- Use every sample column name exactly once; the output array length must equal the number of submission columns.\n"
             "- If current column names already convey the same meaning as sample_submission columns (e.g., only differs in case, spacing, underscores, or similar meaning) and the data type / value patterns also align in preview, please directly output the sample column names in their original order.\n"
             "- If names differ substantially, use the previewed values (data type, ranges, patterns) to infer the best match. Because the submission data order must remain unchanged, reorder the sample column names to align with the current submission column data, and output ordered sample column names.\n"
             "\n"
-            "## Your OUTPUT Format\n"
+            "Output format:\n"
             "Your response should contain ONLY a single markdown code block (wrapped in ```) with a JSON array, without any other text.\n"
             "The JSON array format: ```json\n[\"col_name_1\", \"col_name_2\", ...]\n```\n"
             "The i-th element must be the sample column name that should replace the current name of submission column i.\n"
@@ -117,8 +108,14 @@ def submission_format_fix_prompt(
             "\n"
             "There should be no additional headings or text in your response. MUST the markdown code block. "
         )
+        user_prompt = (
+            f"Sample submission columns (gold order): {sample_cols}\n"
+            f"Current submission columns (current order): {submission_cols}\n\n"
+            f"{_format_preview(sample_df, 'Sample Submission (standard format, first 20 rows)')}\n"
+            f"{_format_preview(submission_df, 'Current Submission (to fix, first 20 rows)')}"
+        )
 
-        return "\n\n".join(prompt_parts)
+        return {"system": system_prompt, "user": user_prompt}
 
     except Exception as e:
         logger.warning(f"Failed to build submission format fix prompt: {e}, skip auto-fix")

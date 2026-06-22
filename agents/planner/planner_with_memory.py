@@ -17,13 +17,14 @@ from llm import generate, compile_prompt_to_md
 from llm.model_profiles import thinking_json_incompatible
 from utils.response import wrap_code
 from .base_planner import (
-    PLANNING_ALLOWED_MODULES,
-    PLANNING_JSON_FORMAT,
-    PLANNING_JSON_SCHEMA,
+    build_planning_json_format,
+    build_planning_json_schema,
     get_component_descriptions,
+    get_planning_allowed_modules,
     build_model_prompt,
     parse_planning_response,
 )
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -38,7 +39,12 @@ def generate_initial_plan(
 ) -> str:
     initial_prompt_dict = prompt_base.copy()
 
-    component_descriptions = get_component_descriptions()
+    allowed_modules = get_planning_allowed_modules(agent_instance=agent_instance)
+    component_descriptions = {
+        name: desc
+        for name, desc in get_component_descriptions().items()
+        if name in allowed_modules
+    }
     component_desc_parts = [f"- **{name}**: {desc}" for name, desc in component_descriptions.items()]
     component_desc_text = "\n".join(component_desc_parts)
     initial_prompt_dict["Available Components"] = component_desc_text
@@ -71,14 +77,14 @@ def generate_initial_plan(
     memory_section = f"# Memory\n{prompt_base.get('Memory', '')}"
 
     user_prompt = (
-        f"\n# Task description\n{prompt_base.get('Task description', '')}\n\n"
-        f"{memory_section}\n\n"
+        f"{task_section(prompt_base.get('Task description', ''), data_preview)}\n"
         f"{instructions}\n"
+        f"{memory_section}\n"
     )
 
     assistant_suffix = (
         f"Okay! I will analyze the current solution and propose an improvement plan.\n"
-        f"Dataset information:\n{data_preview}\n"
+        f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
         f"Previous code:\n{prompt_base['Previous solution']['Code']}\n"
         f"Execution results:\n{wrap_code(context.get('execution_output', ''), lang='')}\n"
         f"Based on the above, I believe there is room for improvement. "
@@ -134,12 +140,17 @@ def refine_plan_to_json(
 
     refinement_guidance = _build_refinement_guidance(similar_success_records, similar_fail_records)
 
-    component_descriptions = get_component_descriptions()
+    allowed_modules = get_planning_allowed_modules(agent_instance=agent_instance)
+    component_descriptions = {
+        name: desc
+        for name, desc in get_component_descriptions().items()
+        if name in allowed_modules
+    }
     component_desc_parts = [f"- **{name}**: {desc}" for name, desc in component_descriptions.items()]
     component_desc_text = "\n".join(component_desc_parts)
 
     user_prompt = _build_refine_user_prompt(
-        prompt_base, initial_plan_text, refinement_guidance, component_desc_text,
+        prompt_base, initial_plan_text, refinement_guidance, component_desc_text, allowed_modules,
     )
 
     if refinement_guidance:
@@ -150,7 +161,7 @@ def refine_plan_to_json(
         )
         assistant_suffix = (
             f"Okay! I will refine the initial plan into a structured JSON format, optimizing it based on similar historical experiments.\n"
-            f"Dataset information:\n{data_preview}\n"
+            f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
             f"Current code:\n{prompt_base['Previous solution']['Code']}\n"
             f"Execution results:\n{wrap_code(context.get('execution_output', ''), lang='')}\n"
             f"Based on the initial plan and similar historical experiments (what worked and what failed), "
@@ -164,7 +175,7 @@ def refine_plan_to_json(
         )
         assistant_suffix = (
             f"Okay! I will convert the initial plan into a structured JSON format.\n"
-            f"Dataset information:\n{data_preview}\n"
+            f"{dataset_reference_sentence(prompt_base.get('Task description', ''), data_preview)}\n"
             f"Current code:\n{prompt_base['Previous solution']['Code']}\n"
             f"Execution results:\n{wrap_code(context.get('execution_output', ''), lang='')}\n"
             f"Based on the initial plan, task requirements, and execution results, "
@@ -179,7 +190,7 @@ def refine_plan_to_json(
         assistant_suffix=assistant_suffix,
     )
 
-    json_schema = PLANNING_JSON_SCHEMA
+    json_schema = build_planning_json_schema(allowed_modules)
     max_retries = 3
     planning_result = None
 
@@ -299,11 +310,18 @@ def _build_refine_user_prompt(
     initial_plan_text: str,
     refinement_guidance: str,
     component_desc_text: str,
+    allowed_modules: list[str],
 ) -> str:
     """Build the user prompt for the refine stage."""
     parts = [
-        "# Task description",
-        prompt_base.get("Task description", ""),
+        task_section(prompt_base.get("Task description", "")),
+        "# Available Components",
+        component_desc_text,
+        "",
+        "**Output format:**",
+        build_planning_json_format(allowed_modules),
+        "",
+        "**CRITICAL:** Return **ONLY** the JSON object, no markdown code blocks, no explanations before or after.",
         "",
         "# Initial Plan (Stage 1)",
         initial_plan_text,
@@ -313,13 +331,7 @@ def _build_refine_user_prompt(
     if refinement_guidance:
         parts.extend([refinement_guidance, ""])
 
-    parts.extend([
-        "# Available Components",
-        component_desc_text,
-        "",
-        "# Task",
-        "",
-    ])
+    parts.extend(["# Task", ""])
 
     if refinement_guidance:
         parts.extend([
@@ -333,7 +345,7 @@ def _build_refine_user_prompt(
             "",
             "**Requirements:**",
             f"- `reason`: Explain why these components are selected, considering the initial plan and how similar historical experiments inform the refinement.",
-            f"- `module`: An **array** of module names (1-3 elements). Each element **MUST be one of**: {', '.join([repr(m) for m in PLANNING_ALLOWED_MODULES])}",
+            f"- `module`: An **array** of module names (1-3 elements). Each element **MUST be one of**: {', '.join([repr(m) for m in allowed_modules])}",
             "- `plan`: An object where:",
             "    * Keys **MUST be exactly the same** as module names in the `module` array",
             "    * Values are **detailed modification plans** (2-5 sentences) following:",
@@ -353,7 +365,7 @@ def _build_refine_user_prompt(
             "",
             "**Requirements:**",
             f"- `reason`: Explain why these components are selected based on the initial plan.",
-            f"- `module`: An **array** of module names (1-3 elements). Each element **MUST be one of**: {', '.join([repr(m) for m in PLANNING_ALLOWED_MODULES])}",
+            f"- `module`: An **array** of module names (1-3 elements). Each element **MUST be one of**: {', '.join([repr(m) for m in allowed_modules])}",
             "- `plan`: An object where:",
             "    * Keys **MUST be exactly the same** as module names in the `module` array",
             "    * Values are **detailed modification plans** (2-5 sentences) following:",
@@ -365,10 +377,6 @@ def _build_refine_user_prompt(
 
     parts.extend([
         "",
-        "**Output format:**",
-        PLANNING_JSON_FORMAT,
-        "",
-        "**CRITICAL:** Return **ONLY** the JSON object, no markdown code blocks, no explanations before or after.",
     ])
 
     return "\n".join(parts)

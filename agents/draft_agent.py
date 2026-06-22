@@ -17,6 +17,7 @@ from agents.prompts import (
     get_impl_guideline_from_agent,
 )
 from agents.planner import build_chat_prompt_for_model
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -124,31 +125,43 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
     prompt["Instructions"] |= prompt_leakage_prevention()
 
     if agent.use_coldstart and (agent.coldstart_description != "None model"):
-        coldstart_guideline = [
-            f"""
+        if "Reference pattern" in str(agent.coldstart_description):
+            coldstart_guideline = [
+                f"""
+            **Cold-start Method Strategy**:
+
+            **Recommended references**: {agent.coldstart_description}
+
+            These are method-level references, not fixed pretrained-model snippets.
+            - Adapt the reference pattern to the current task; do NOT copy it blindly.
+            - If the task is an optimization problem, first compare OR/heuristic baselines with any RL formulation.
+            - Use RL only when a state/action/transition/reward formulation is natural and evaluable.
+            - If a `Reference pattern` conflicts with the task description, the task description and metric take priority.
+            """
+            ]
+        else:
+            coldstart_guideline = [
+                f"""
             **Pretrained Model Strategy**:
 
-            • **Option A [RECOMMENDED]**: {agent.coldstart_description}
-              → SOTA models with proven performance. Use for end-to-end fine-tuning OR as frozen feature extractors.
+            **Option A [RECOMMENDED]**: {agent.coldstart_description}
+              Strong pretrained models with proven transfer performance. Use for end-to-end fine-tuning OR as frozen feature extractors.
 
-            • **Option B**: Alternative pretrained models if better suited to task characteristics.
+            **Option B**: Alternative pretrained models if better suited to task characteristics.
 
-            • **Option C**: Train from scratch / non-DL methods (only when pretraining provides no advantage).
+            **Option C**: Train from scratch / non-DL methods only when pretraining provides no advantage.
 
-            **CRITICAL: When using any recommended pretrained model (Option A), you MUST copy the Code template EXACTLY as provided — including model variant names, file paths, and checkpoint filenames. Only the listed weights are available locally; other variants will fail to load.**
+            **CRITICAL: When using any recommended pretrained model (Option A), you MUST copy the Code template EXACTLY as provided, including model variant names, file paths, and checkpoint filenames. Only the listed weights are available locally; other variants may fail to load.**
 
             **Key Techniques**:
-            1. **Feature Extractor Pattern**: If dataset is small or domain mismatch exists → Freeze backbone + train only final layers (or feed to XGBoost/SVM).
-
-            2. **Mixed Precision (MANDATORY for pretrained models)**: Use `torch.cuda.amp` (autocast + GradScaler) to save memory. DO NOT manually convert to .half().
-
-            3. **Avoid Timeouts**: #1 cause is slow data loading, NOT GPU model.
-               • Use DataLoader with num_workers>=2, pin_memory=True (NOT raw for loops)
-               • For large datasets + heavy backbones: Extract & cache features to disk (.npy/.h5)
+            1. **Feature Extractor Pattern**: If dataset is small or domain mismatch exists, freeze backbone + train only final layers or feed extracted features to another model.
+            2. **Mixed Precision**: Use `torch.cuda.amp` or `torch.amp` autocast/GradScaler where appropriate. Do NOT manually convert pretrained models to `.half()` unless the code is designed for it.
+            3. **Avoid Timeouts**: Use DataLoader with num_workers>=2 and cache extracted features for large datasets/heavy backbones.
             """
-        ]
+            ]
     else:
         coldstart_guideline = [""]
+
 
     prompt["Instructions"]["Implementation guideline"].extend(coldstart_guideline)
     prompt["Instructions"] |= get_prompt_environment()
@@ -161,8 +174,11 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
     if prompt.get("Memory", "").strip():
         memory_section = f"\n# Memory\nBelow is a record of previous solution attempts and their outcomes:\n {prompt['Memory']}\n"
 
-    user_prompt = f"\n# Task description\n{prompt['Task description']}{memory_section}\n{instructions}"
-    assistant_prefix = f"Let me approach this systematically.\nFirst, I'll examine the dataset:\n{agent.data_preview}"
+    user_prompt = f"{task_section(prompt['Task description'], agent.data_preview)}\n{instructions}{memory_section}"
+    assistant_prefix = (
+        "Let me approach this systematically.\n"
+        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}"
+    )
     prompt_complete = build_chat_prompt_for_model(
         agent.acfg.code.model, introduction, user_prompt, assistant_prefix
     )

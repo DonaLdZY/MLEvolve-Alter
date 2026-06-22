@@ -14,6 +14,7 @@ from agents.prompts import (
 from agents.coder.diff_coder import SearchReplacePatcher, DIFF_SYS_FORMAT
 from agents.planner import build_chat_prompt_for_model
 from agents.triggers import register_node
+from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -57,6 +58,12 @@ def _format_debug_memory_guidance(agent, similar_fixes: List[Tuple]) -> str:
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:
+    output_requirement = (
+        "Complete test inference and submission.csv generation"
+        if getattr(agent.acfg, "generate_submission", True)
+        else "Complete validation inference and metric calculation; final submission.csv generation is disabled by config"
+    )
+
     debugging_standards = (
         "🔧 Debug SYSTEMATICALLY: Read error → Identify root cause → Apply minimal, targeted fix.\n\n"
         "**Do**: Fix root cause, preserve solution intent, maintain code quality.\n"
@@ -75,7 +82,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         "   • All data loading and preprocessing\n"
         "   • Complete model definition and training\n"
         "   • Complete validation metric calculation\n"
-        "   • Complete test inference and submission.csv generation\n"
+        f"   • {output_requirement}\n"
         "   • Every line of code needed to run from beginning to end\n\n"
         "Your response format:\n"
         "1. A brief implementation outline (2-3 sentences) explaining the bugfix\n"
@@ -148,8 +155,15 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
 
     def build_prompt_complete(instructions_with_format, use_full_code_requirement=False):
         current_introduction = introduction_base + (full_code_requirement if use_full_code_requirement else "")
-        user_prompt = f"\n# Task description\n{prompt['Task description']}\n{instructions_with_format}"
-        assistant_prefix = f"Let me approach this systematically.\nFirst, I'll review the dataset:\n{agent.data_preview}\nThe code that needs fixing:\n{prompt['Previous (buggy) implementation']}\nThe error/issue encountered:\n{prompt['Execution output']}\nAnalyzing the root cause: {parent_node.analysis}\nI'll now fix this issue."
+        user_prompt = f"{task_section(prompt['Task description'], agent.data_preview)}{instructions_with_format}"
+        assistant_prefix = (
+            "Let me approach this systematically.\n"
+            f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+            f"The code that needs fixing:\n{prompt['Previous (buggy) implementation']}\n"
+            f"The error/issue encountered:\n{prompt['Execution output']}\n"
+            f"Analyzing the root cause: {parent_node.analysis}\n"
+            "I'll now fix this issue."
+        )
         return build_chat_prompt_for_model(agent.acfg.code.model, current_introduction, user_prompt, assistant_prefix)
 
     parent_node.add_expected_child_count()

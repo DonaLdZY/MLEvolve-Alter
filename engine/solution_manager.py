@@ -5,6 +5,7 @@ import logging
 from collections import defaultdict
 from typing import List
 
+from engine.model_artifacts import find_model_artifacts
 from engine.search_node import SearchNode
 
 logger = logging.getLogger("MLEvolve")
@@ -57,25 +58,62 @@ def write_metric_file(filepath, node, metric_maximize: bool) -> None:
             f.write(f"Created Time: N/A\n")
 
 
+def copy_model_artifacts(agent, node: SearchNode, target_dir) -> None:
+    """Copy node-specific model artifacts into a solution directory."""
+    artifacts = find_model_artifacts(agent.cfg.workspace_dir, str(node.id))
+    artifacts_dir = target_dir / "model_artifacts"
+    if artifacts_dir.exists():
+        shutil.rmtree(artifacts_dir)
+    if not artifacts:
+        logger.warning(f"No model artifacts found for node {node.id}")
+        return
+
+    artifacts_dir.mkdir(exist_ok=True, parents=True)
+    manifest_lines = []
+    for src in artifacts:
+        try:
+            dst = artifacts_dir / src.name
+            shutil.copy2(src, dst)
+            manifest_lines.append(f"- {src.name} <- {src}")
+        except Exception as e:
+            logger.error(f"Failed to copy model artifact for node {node.id}: {src} -> {e}")
+    if manifest_lines:
+        (target_dir / "model_artifacts_manifest.md").write_text(
+            "# Model Artifacts\n\n" + "\n".join(manifest_lines) + "\n",
+            encoding="utf-8",
+        )
+        primary = artifacts_dir / artifacts[0].name
+        (target_dir / "model_path.txt").write_text(str(primary), encoding="utf-8")
+
+
 def save_best_solution(agent, result_node, submission_file_path) -> None:
     """Save best solution code, submission, and meta to disk (thread-safe via agent.save_node_lock)."""
     best_solution_dir = agent.cfg.workspace_dir / "best_solution"
     best_submission_dir = agent.cfg.workspace_dir / "best_submission"
+    generate_submission = getattr(agent.acfg, "generate_submission", True)
 
     with agent.save_node_lock:
         best_solution_dir.mkdir(exist_ok=True, parents=True)
-        best_submission_dir.mkdir(exist_ok=True, parents=True)
 
-        shutil.copy(
-            submission_file_path,
-            best_submission_dir / "submission.csv",
-        )
+        if generate_submission:
+            best_submission_dir.mkdir(exist_ok=True, parents=True)
+            if submission_file_path.exists():
+                shutil.copy(
+                    submission_file_path,
+                    best_submission_dir / "submission.csv",
+                )
+            else:
+                logger.warning(
+                    f"Best node {result_node.id} has no submission file to copy: {submission_file_path}"
+                )
 
         with open(best_solution_dir / "solution.py", "w") as f:
             f.write(result_node.code)
 
         with open(best_solution_dir / "node_id.txt", "w") as f:
             f.write(str(result_node.id))
+
+        copy_model_artifacts(agent, result_node, best_solution_dir)
 
         write_metric_file(
             best_solution_dir / "metric.txt",
@@ -142,6 +180,7 @@ def save_top_candidates(agent) -> None:
     All top-N files are organized under a single 'top_solution/' directory for better organization.
     Does not change best_node logic. Thread-safe with save_node_lock.
     """
+    generate_submission = getattr(agent.acfg, "generate_submission", True)
     with agent.save_node_lock:
         top_solution_dir = agent.cfg.workspace_dir / "top_solution"
         top_solution_dir.mkdir(exist_ok=True, parents=True)
@@ -161,8 +200,12 @@ def save_top_candidates(agent) -> None:
                     node,
                     agent.metric_maximize,
                 )
+                copy_model_artifacts(agent, node, rank_dir)
             except Exception as e:
                 logger.error(f"Failed to save top{rank} solution files for node {node.id}: {e}")
+
+            if not generate_submission:
+                continue
 
             # Copy submission to the same directory
             submission_file_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"

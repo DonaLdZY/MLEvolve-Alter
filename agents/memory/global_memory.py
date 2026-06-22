@@ -27,6 +27,10 @@ class GlobalMemoryLayer:
     def __init__(
         self,
         memory_dir: str,
+        embedding_backend: str = "local",
+        embedding_api_key: str = "",
+        embedding_base_url: str = "",
+        embedding_model: str = "",
         embedding_model_path: str = "",
         embedding_device: str = "cuda",
         similarity_threshold: float = 0.7,
@@ -35,11 +39,42 @@ class GlobalMemoryLayer:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.similarity_threshold = similarity_threshold
 
-        self.embedding_model = EmbeddingModel(
-            model_type="local",
-            model_name=embedding_model_path,
-            device=embedding_device,
-        )
+        backend = (embedding_backend or "local").lower()
+        if backend == "local":
+            self.embedding_model = EmbeddingModel(
+                model_type="local",
+                model_name=embedding_model_path,
+                device=embedding_device,
+            )
+        elif backend == "openai":
+            if not embedding_model:
+                raise ValueError("memory_embedding_model is required for openai embedding backend")
+            self.embedding_model = EmbeddingModel(
+                model_type="openai",
+                model_name=embedding_model,
+                api_key=embedding_api_key or None,
+                base_url=embedding_base_url or None,
+            )
+        elif backend == "azure":
+            if not embedding_model:
+                raise ValueError("memory_embedding_model is required for azure embedding backend")
+            self.embedding_model = EmbeddingModel(
+                model_type="azure",
+                model_name=embedding_model,
+                api_key=embedding_api_key or None,
+                base_url=embedding_base_url or None,
+            )
+        elif backend == "custom":
+            if not embedding_model:
+                raise ValueError("memory_embedding_model is required for custom embedding backend")
+            self.embedding_model = EmbeddingModel(
+                model_type="custom",
+                model_name=embedding_model,
+                api_key=embedding_api_key or None,
+                base_url=embedding_base_url or None,
+            )
+        else:
+            raise ValueError(f"Unsupported memory embedding backend: {embedding_backend}")
         self.retriever = HybridRetriever(self.embedding_model)
 
         self.records: List[MemRecord] = []

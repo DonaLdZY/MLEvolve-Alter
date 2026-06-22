@@ -13,8 +13,62 @@ import os
 os.environ['USE_TF'] = '0'
 os.environ['USE_TORCH'] = '1'
 
+import logging
+import time
 import numpy as np
 from typing import List, Literal, Optional
+
+logger = logging.getLogger("MLEvolve")
+NETWORK_RETRY_MAX_ATTEMPTS = 5
+NETWORK_RETRY_MAX_SLEEP_SECONDS = 30.0
+
+
+def _is_retryable_error(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    msg = str(exc).lower()
+    if any(
+        key in name
+        for key in [
+            "timeout",
+            "connection",
+            "ratelimit",
+            "internalserver",
+            "apierror",
+            "apiconnection",
+            "badgateway",
+            "serviceunavailable",
+            "gateway",
+            "httpstatus",
+        ]
+    ):
+        return True
+    return any(
+        key in msg
+        for key in [
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection aborted",
+            "connection refused",
+            "10061",
+            "actively refused",
+            "积极拒绝",
+            "temporary failure",
+            "temporarily unavailable",
+            "bad gateway",
+            "502",
+            "503",
+            "504",
+            "rate limit",
+            "too many requests",
+            "getaddrinfo",
+            "11001",
+            "name resolution",
+            "name or service not known",
+            "server disconnected",
+            "remote protocol error",
+        ]
+    )
 
 
 class EmbeddingModel:
@@ -66,8 +120,7 @@ class EmbeddingModel:
         elif model_type == "openai":
             import openai
             self.client = openai.OpenAI(api_key=api_key, base_url=base_url)
-            # OpenAI text-embedding-3-small: 1536, text-embedding-ada-002: 1536
-            self.dimension = dimension or 1536
+            self.dimension = dimension
         elif model_type == "azure":
             import openai
             self.client = openai.AzureOpenAI(
@@ -75,7 +128,7 @@ class EmbeddingModel:
                 api_version=kwargs.get("api_version", "2023-05-15"),
                 azure_endpoint=base_url
             )
-            self.dimension = dimension or 1536
+            self.dimension = dimension
         elif model_type == "custom":
             # Custom API - user needs to implement their own logic
             self.dimension = dimension
@@ -83,6 +136,30 @@ class EmbeddingModel:
                 raise ValueError("dimension must be specified for custom model type")
         else:
             raise ValueError(f"Unsupported model_type: {model_type}")
+
+    def _create_embedding_with_retry(self, texts: List[str]):
+        last_exc: Exception | None = None
+        for attempt in range(1, NETWORK_RETRY_MAX_ATTEMPTS + 1):
+            try:
+                return self.client.embeddings.create(
+                    model=self.model_name,
+                    input=texts,
+                )
+            except Exception as exc:
+                last_exc = exc
+                retryable = _is_retryable_error(exc)
+                logger.warning(
+                    "Embedding API failed, retryable=%s, attempt %s/%s: %s",
+                    retryable,
+                    attempt,
+                    NETWORK_RETRY_MAX_ATTEMPTS,
+                    exc,
+                )
+                if (not retryable) or attempt >= NETWORK_RETRY_MAX_ATTEMPTS:
+                    raise
+                time.sleep(min(NETWORK_RETRY_MAX_SLEEP_SECONDS, 5.0 * attempt))
+        if last_exc is not None:
+            raise last_exc
 
     def encode(self, texts: List[str], show_progress_bar: bool = False) -> np.ndarray:
         """
@@ -100,19 +177,17 @@ class EmbeddingModel:
             return np.array(embeddings, dtype=np.float32)
 
         elif self.model_type == "openai":
-            response = self.client.embeddings.create(
-                model=self.model_name,
-                input=texts
-            )
+            response = self._create_embedding_with_retry(texts)
             embeddings = [item.embedding for item in response.data]
+            if self.dimension is None and embeddings:
+                self.dimension = len(embeddings[0])
             return np.array(embeddings, dtype=np.float32)
 
         elif self.model_type == "azure":
-            response = self.client.embeddings.create(
-                model=self.model_name,
-                input=texts
-            )
+            response = self._create_embedding_with_retry(texts)
             embeddings = [item.embedding for item in response.data]
+            if self.dimension is None and embeddings:
+                self.dimension = len(embeddings[0])
             return np.array(embeddings, dtype=np.float32)
 
         elif self.model_type == "custom":
