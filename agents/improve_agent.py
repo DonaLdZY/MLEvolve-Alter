@@ -14,6 +14,7 @@ from agents.prompts import (
     prompt_resp_fmt,
     get_internet_clarification,
     get_impl_guideline_from_agent,
+    is_optimization_or_rl_task,
 )
 from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix, build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
@@ -24,11 +25,21 @@ logger = logging.getLogger("MLEvolve")
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:
+    optimization_or_rl = is_optimization_or_rl_task(
+        task_desc=getattr(agent, "task_desc", ""),
+        coldstart_description=getattr(agent, "coldstart_description", ""),
+    )
     improvement_standards = (
         "🎯 As a Grandmaster, make MEANINGFUL improvements that boost leaderboard performance.\n\n"
         "**Acceptable**: Advanced architectures, ensemble techniques, feature engineering, hyperparameter optimization, improved pipelines.\n"
         "**NOT Acceptable**: Cosmetic changes, minor tweaks without justification, breaking functionality.\n\n"
     )
+    if optimization_or_rl:
+        improvement_standards = (
+            "You are an expert optimization/RL/decision-solver improving a runnable candidate solution.\n\n"
+            "**Acceptable**: better data loading/schema mapping, stricter task-defined validation, better official objective value, local search/repair, OR-style solver upgrades, or an RL branch that reuses the same evaluator.\n"
+            "**NOT Acceptable**: throwing away a scorable partial solution without preserving its evaluator, replacing the official score with reward/training loss, or treating no-op/placeholder output as competitive.\n\n"
+        )
 
     introduction = (
         improvement_standards +
@@ -213,6 +224,18 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             "- Don't suggest to do EDA.\n",
         ],
     }
+    if optimization_or_rl:
+        prompt["Instructions"] |= {
+            "Decision optimization improvement guidelines": [
+                "- Build on any partial solution with a usable scalar score. Preserve `load_problem_data`, `validate_solution`, `score_solution`, optional diagnostics, and the exact output schema unless they are the defect being fixed.",
+                "- Improvement priority is task-specific: fix schema/read errors first, then improve the official scalar score by targeting the objective components and validator evidence reported by the parent node.",
+                "- Use the validation summary counts/examples to target the actual bottleneck. Do not assume every optimization task uses the same progress signals.",
+                "- Improve feasible candidate generation before model tuning: construct task-defined constraint masks and select only from legal actions. If the mask is empty, add a documented task-approved fallback, repair step, or backtracking/new-resource branch and report examples.",
+                "- Keep or add task-relevant diagnostics when useful, but the parser accepts nodes by the final scalar score rather than requiring specific diagnostic fields.",
+                "- If RL is requested, add it as a branch on top of the same deterministic evaluator and compare against the current heuristic baseline. Do not replace `Final Validation Score` with reward, episode return, or training loss.",
+                "- If the current approach is empty/no-op/placeholder, first repair feasible candidate generation and data mapping; do not spend the next node only tuning model hyperparameters.",
+            ],
+        }
 
     prompt["Instructions"] |= get_impl_guideline_from_agent(agent)
     prompt["Instructions"] |= prompt_leakage_prevention()

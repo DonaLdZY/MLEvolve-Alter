@@ -2,6 +2,7 @@
 
 from .shared import (
     ROBUSTNESS_GENERALIZATION_STRATEGY,
+    get_decision_solution_protocol,
     get_optimization_rl_strategy,
     prompt_leakage_prevention,
     prompt_resp_fmt,
@@ -13,6 +14,7 @@ from .impl_guideline import get_impl_guideline, get_impl_guideline_from_agent
 
 __all__ = [
     "ROBUSTNESS_GENERALIZATION_STRATEGY",
+    "get_decision_solution_protocol",
     "get_optimization_rl_strategy",
     "prompt_leakage_prevention",
     "prompt_resp_fmt",

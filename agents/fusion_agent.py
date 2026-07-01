@@ -52,7 +52,7 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
             "Plan": source_node.plan,
             "Code": wrap_code(source_node.code),
             "Performance": source_node.metric.value if source_node.metric else 'N/A',
-            "Analysis": source_node.analysis if source_node.analysis else 'N/A'
+            "Analysis": source_node.analysis_for_prompt if source_node.analysis_for_prompt else 'N/A'
         },
         "Reference Solution": reference_trajectory,
         "Instructions": {},
@@ -202,7 +202,7 @@ def _fuse_with_multiple_references(
             "Plan": parent_node.plan,
             "Code": wrap_code(parent_node.code),
             "Performance": parent_node.metric.value if parent_node.metric else 'N/A',
-            "Analysis": parent_node.analysis if parent_node.analysis else 'N/A'
+            "Analysis": parent_node.analysis_for_prompt if parent_node.analysis_for_prompt else 'N/A'
         },
         "Reference Solutions": reference_memory,
         "Instructions": {},
@@ -431,7 +431,7 @@ def _diff_fusion(agent, prompt_base, data_preview, source_node):
         "current_code": source_node.code,
         "current_plan": source_node.plan,
         "current_performance": source_node.metric.value if source_node.metric else 'N/A',
-        "current_analysis": source_node.analysis if source_node.analysis else 'N/A',
+        "current_analysis": source_node.analysis_for_prompt if source_node.analysis_for_prompt else 'N/A',
         "reference_solution": reference_solution,
     }
 
@@ -481,7 +481,7 @@ def _diff_multi_fusion(agent, prompt_base, data_preview, parent_node):
         "current_code": parent_node.code,
         "current_plan": parent_node.plan,
         "current_performance": parent_node.metric.value if parent_node.metric else 'N/A',
-        "current_analysis": parent_node.analysis if parent_node.analysis else 'N/A',
+        "current_analysis": parent_node.analysis_for_prompt if parent_node.analysis_for_prompt else 'N/A',
         "reference_solutions": reference_solutions,
     }
 

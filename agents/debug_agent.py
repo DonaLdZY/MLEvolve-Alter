@@ -9,6 +9,7 @@ from agents.prompts import (
     ROBUSTNESS_GENERALIZATION_STRATEGY,
     get_internet_clarification,
     get_impl_guideline_from_agent,
+    is_optimization_or_rl_task,
 )
 
 from agents.coder.diff_coder import SearchReplacePatcher, DIFF_SYS_FORMAT
@@ -115,6 +116,18 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             "- Most libraries are stable and available. The bug is not caused by the library version mismatch. **Don't suggest to reinstall the core libraries.** (like pip install torch, pip upgrade transformers, !pip install tensorflow, subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'transformers', 'accelerate', 'pandas', 'torch', 'torchvision']))\n",
         ],
     }
+    optimization_or_rl = is_optimization_or_rl_task(
+        task_desc=getattr(agent, "task_desc", ""),
+        coldstart_description=getattr(agent, "coldstart_description", ""),
+    )
+    if optimization_or_rl:
+        prompt["Instructions"]["Decision-task debug priorities"] = [
+            "- If the parent analysis shows a no-op/placeholder/diagnostic solution or a task-specific validator bottleneck, first repair feasible candidate generation and data/schema mapping. Do not spend this debug attempt tuning PPO/DQN epochs, neural dimensions, or reward shaping.",
+            "- If the parent has a partial but scored solution, preserve its `load_problem_data`, `validate_solution`, `score_solution`, optional diagnostics, and output schema. Debug should reduce the named bottleneck reported by the task-specific validator, parser analysis, or execution trace.",
+            "- For invalid actions or infeasible candidate choices, add or fix a task-defined constraint mask before selection. If the legal-action mask is empty, follow the task contract's fallback with reason examples instead of selecting a known-illegal action or crashing.",
+            "- If task constraints make a complete/feasible solution impossible under the available data, keep the official penalized score and report the task-defined remaining/impossible cases as counts and examples. Do not crash or force fake decisions.",
+            "- The fixed script should print task-appropriate diagnostics when useful, but acceptance depends on the final scalar score rather than any required diagnostic field.",
+        ]
     prompt["Instructions"] |= get_impl_guideline_from_agent(agent)
     prompt["Instructions"] |= ROBUSTNESS_GENERALIZATION_STRATEGY
 
@@ -161,7 +174,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
             f"The code that needs fixing:\n{prompt['Previous (buggy) implementation']}\n"
             f"The error/issue encountered:\n{prompt['Execution output']}\n"
-            f"Analyzing the root cause: {parent_node.analysis}\n"
+            f"Analyzing the root cause and parser facts:\n{parent_node.analysis_for_prompt}\n"
             "I'll now fix this issue."
         )
         return build_chat_prompt_for_model(agent.acfg.code.model, current_introduction, user_prompt, assistant_prefix)
@@ -234,7 +247,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                         if not plan:
                             error_parts = []
                             parent_error = getattr(parent_node, "exc_type", None)
-                            parent_analysis = getattr(parent_node, "analysis", None)
+                            parent_analysis = getattr(parent_node, "analysis_for_prompt", None)
                             if parent_error:
                                 error_parts.append(f"Parent error: {parent_error}")
                             if parent_analysis:

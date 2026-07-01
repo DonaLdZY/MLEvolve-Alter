@@ -311,6 +311,7 @@ class AgentSearch:
                         exec_result=exe_res
                     )
                     execution.validate_executed_node(self, result_node)
+                    result_parse_agent.refresh_human_node_insight(self, result_node)
                     logger.info(f"The metric value of node {result_node.id} is {result_node.metric.value}.")
                     result_node.finish_time = time.strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -397,6 +398,7 @@ class AgentSearch:
             )
 
             execution.validate_executed_node(self, node)
+            result_parse_agent.refresh_human_node_insight(self, node)
 
             logger.info(f"Node {node.id} execution completed: metric={node.metric.value}, is_buggy={node.is_buggy}")
 

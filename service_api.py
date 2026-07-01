@@ -268,6 +268,29 @@ def _parse_metric_obj(metric_obj: Any) -> tuple[float | None, bool | None]:
     return value, maximize
 
 
+def _read_pending_nodes(log_dir: Path) -> list[dict[str, Any]]:
+    payload = _safe_read_json(log_dir / "pending_nodes.json", {})
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("nodes")
+    if not isinstance(rows, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        node_id = str(row.get("id") or "").strip()
+        if not node_id:
+            continue
+        row = dict(row)
+        row["id"] = node_id
+        row["pending_execution"] = bool(
+            row.get("pending_execution") or row.get("status") in {"generating", "pending_execution", "executing"}
+        )
+        out.append(row)
+    return out
+
+
 def _resolve_best_node_id(log_dir: Path, workspace_dir: Path, nodes: list[dict[str, Any]]) -> str | None:
     best_file = workspace_dir / "best_solution" / "node_id.txt"
     if best_file.exists():
@@ -396,7 +419,10 @@ def _build_snapshot(req: SnapshotRequest) -> dict[str, Any]:
                     "plan": node.get("plan"),
                     "code": node.get("code"),
                     "result": result,
-                    "insight": node.get("analysis"),
+                    "insight": node.get("llm_insight") or node.get("analysis"),
+                    "llm_insight": node.get("llm_insight"),
+                    "parser_analysis": node.get("parser_analysis") or node.get("analysis"),
+                    "decision_signals": node.get("decision_signals"),
                     "metric": metric,
                     "maximize": maximize,
                     "is_buggy": node.get("is_buggy"),
@@ -411,6 +437,11 @@ def _build_snapshot(req: SnapshotRequest) -> dict[str, Any]:
                 }
             )
 
+    journal_node_ids = {str(node.get("id")) for node in node_rows if node.get("id")}
+    pending_nodes = [
+        node for node in _read_pending_nodes(log_dir)
+        if str(node.get("id")) not in journal_node_ids
+    ]
     best_node_id = _resolve_best_node_id(log_dir, workspace_dir or Path("."), node_rows)
     best_solution_code = _safe_read_text((workspace_dir / "best_solution" / "solution.py") if workspace_dir else Path(""), limit=200000)
     best_metric_text = _safe_read_text((workspace_dir / "best_solution" / "metric.txt") if workspace_dir else Path(""), limit=20000)
@@ -421,6 +452,7 @@ def _build_snapshot(req: SnapshotRequest) -> dict[str, Any]:
         "workspace_dir": str(workspace_dir) if workspace_dir else "",
         "events": _parse_log_events(log_dir / "MLEvolve.log"),
         "nodes": node_rows,
+        "pending_nodes": pending_nodes,
         "best_node_id": best_node_id,
         "journal_source": journal_source,
         "best_solution_code": best_solution_code,

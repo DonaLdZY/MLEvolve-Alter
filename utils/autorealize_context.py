@@ -16,6 +16,7 @@ from typing import Any
 logger = logging.getLogger("MLEvolve")
 
 CONTEXT_MARKER = "AutoRealize Structured Context"
+MIN_PROMPT_READY_CONTEXT_CHARS = 900
 
 
 def _safe_read_json(path: Path) -> Any:
@@ -91,11 +92,13 @@ def _load_contracts(input_dir: Path) -> dict[str, Any]:
         input_dir,
         [
             "automl_context_pack.json",
-            "agent_context_pack.json",
         ],
     )
     if pack_path is None:
-        pack_path = _first_existing(report_dir, ["automl_context_pack.json", "agent_context_pack.json"])
+        pack_path = _first_existing(report_dir, ["automl_context_pack.json"])
+    agent_pack_path = _first_existing(input_dir, ["agent_context_pack.json"])
+    if agent_pack_path is None:
+        agent_pack_path = _first_existing(report_dir, ["agent_context_pack.json"])
     markdown_path = _first_existing(
         input_dir,
         [
@@ -109,24 +112,64 @@ def _load_contracts(input_dir: Path) -> dict[str, Any]:
         "report_dir": report_dir,
         "automl_pack": _safe_read_json(pack_path) if pack_path else None,
         "automl_md": _safe_read_text(markdown_path, limit=None) if markdown_path else "",
+        "automl_pack_path": str(pack_path) if pack_path else "",
+        "automl_md_path": str(markdown_path) if markdown_path else "",
         "problem": _safe_read_json(report_dir / "problem_paradigm_report.json") or {},
         "data_access": _safe_read_json(report_dir / "data_access_protocol.json") or {},
         "bundle": _safe_read_json(report_dir / "description_protocol_bundle.json") or {},
         "evaluation_report": _safe_read_json(report_dir / "evaluation_contract_report.json") or {},
         "task_report": _safe_read_json(report_dir / "task_definition_report.json") or {},
-        "agent_pack": _safe_read_json(report_dir / "agent_context_pack.json") or _safe_read_json(input_dir / "agent_context_pack.json") or {},
+        "agent_pack": _safe_read_json(agent_pack_path) if agent_pack_path else {},
         "description": _safe_read_text(input_dir / "description.md", limit=30000),
     }
 
 
+def _pack_is_prompt_ready(pack: Any) -> bool:
+    """Return True only for the final AutoRealize AutoML context pack.
+
+    Partial artifacts such as agent_context_pack/problem_paradigm_report are useful
+    audit material, but they are not enough to replace MLEvolve's standalone data
+    preview. Accept only packs that carry the downstream contracts MLEvolve needs.
+    """
+
+    if not isinstance(pack, dict) or not pack:
+        return False
+    has_goal = bool(pack.get("task_goal") or pack.get("problem_paradigm"))
+    has_data = bool(pack.get("data_access"))
+    has_eval = isinstance(pack.get("evaluation_contract"), dict) and bool(pack.get("evaluation_contract"))
+    has_output = isinstance(pack.get("output_contract"), dict) and bool(pack.get("output_contract"))
+    return has_goal and has_data and (has_eval or has_output)
+
+
+def _markdown_is_prompt_ready(text: str) -> bool:
+    text = str(text or "").strip()
+    if not text or len(text) < MIN_PROMPT_READY_CONTEXT_CHARS:
+        return False
+    lowered = text.lower()
+    has_marker = (
+        CONTEXT_MARKER.lower() in lowered
+        or "autorealize context for automl" in lowered
+        or "automl context" in lowered
+    )
+    has_data = (
+        "data access" in lowered
+        or "data access and orchestration" in lowered
+        or "exact source schema contract" in lowered
+        or "supplemental data facts" in lowered
+        or "data facts" in lowered
+        or "鏁版嵁璁块棶" in text
+    )
+    has_eval = "evaluation contract" in lowered or "final_validation_score" in lowered or "评估" in text
+    has_output = "output contract" in lowered or "submission" in lowered or "输出" in text or "提交" in text
+    return has_marker and has_data and (has_eval or has_output)
+
+
 def has_autorealize_context(input_dir: Path) -> bool:
     contracts = _load_contracts(Path(input_dir))
-    return bool(
-        contracts.get("automl_pack")
-        or contracts.get("automl_md")
-        or contracts.get("bundle")
-        or contracts.get("evaluation_report")
-        or contracts.get("data_access")
+    if str(contracts.get("automl_md") or "").strip():
+        return True
+    return _pack_is_prompt_ready(contracts.get("automl_pack")) or _markdown_is_prompt_ready(
+        str(contracts.get("automl_md") or "")
     )
 
 
@@ -143,11 +186,87 @@ def _render_from_pack(pack: dict[str, Any]) -> str:
         lines.append("### Priority Rules")
         lines.extend(f"- {x}" for x in priority_rules)
         lines.append("")
+
+    schema_contract = pack.get("data_schema_contract") if isinstance(pack.get("data_schema_contract"), dict) else {}
+    if schema_contract:
+        lines.append("### Exact Source Schema Contract")
+        for item in _nonempty(schema_contract.get("rules"), limit=10):
+            lines.append(f"- {item}")
+        snippet = str(schema_contract.get("runtime_inspection_snippet", "") or "").strip()
+        if snippet:
+            lines.append(f"- runtime_inspection_snippet: {_truncate(snippet, 1200)}")
+        workbooks = schema_contract.get("workbooks") if isinstance(schema_contract.get("workbooks"), list) else []
+        for workbook in workbooks[:20]:
+            if not isinstance(workbook, dict):
+                continue
+            sheets = [str(x) for x in (workbook.get("valid_sheet_names_exact") or [])[:20]]
+            lines.append(f"- workbook `{workbook.get('source_file')}` valid_sheet_names_exact: {sheets}")
+        tables = schema_contract.get("tables") if isinstance(schema_contract.get("tables"), list) else []
+        for table in tables[:32]:
+            if not isinstance(table, dict):
+                continue
+            table_id = table.get("table_id") or table.get("source_file") or "table"
+            lines.append(
+                f"- table `{table_id}`: kind={table.get('table_kind')}; "
+                f"sheet_name={table.get('sheet_name')}; shape={table.get('shape')}; "
+                f"column_count={table.get('column_count')}"
+            )
+            group = table.get("schema_group") if isinstance(table.get("schema_group"), dict) else {}
+            if group:
+                lines.append(
+                    f"  - schema_group: file_count={group.get('file_count')}; "
+                    f"representative_files={group.get('representative_files')}"
+                )
+            columns = [str(x) for x in (table.get("physical_columns_exact") or [])[:120]]
+            if columns:
+                lines.append("  - physical_columns_exact: " + ", ".join(f"`{x}`" for x in columns))
+            omitted = int(table.get("physical_columns_omitted") or 0)
+            if omitted:
+                lines.append(f"  - physical_columns_omitted: {omitted}")
+            fields = table.get("field_summaries") if isinstance(table.get("field_summaries"), list) else []
+            if fields:
+                rendered = []
+                for field in fields[:10]:
+                    if not isinstance(field, dict):
+                        continue
+                    rendered.append(
+                        "; ".join(
+                            str(x)
+                            for x in [
+                                f"name={field.get('name')}",
+                                f"meaning={_truncate(field.get('meaning'), 180)}" if field.get("meaning") else "",
+                                f"type={field.get('logical_type')}" if field.get("logical_type") else "",
+                            ]
+                            if str(x).strip()
+                        )
+                    )
+                if rendered:
+                    lines.append("  - key_field_summaries: " + " | ".join(rendered))
+        lines.append("")
     lines.append("### Problem And Goal")
     lines.append(f"- problem_paradigm: `{pack.get('problem_paradigm') or 'unknown_but_executable'}`")
     if pack.get("task_goal"):
         lines.append(f"- task_goal: {_truncate(pack.get('task_goal'), 1600)}")
     lines.append("")
+
+    method = pack.get("method_strategy") if isinstance(pack.get("method_strategy"), dict) else {}
+    if method:
+        lines.append("### Method Strategy")
+        for key in ["problem_paradigm", "explicit_rl_requested", "rl_as_required_paradigm"]:
+            if key in method:
+                lines.append(f"- {key}: `{method.get(key)}`")
+        families = _nonempty(method.get("recommended_solver_families"), limit=10)
+        if families:
+            lines.append("- recommended_solver_families: " + ", ".join(f"`{x}`" for x in families))
+        for key in ["first_draft_policy", "rl_branch_policy"]:
+            value = str(method.get(key, "") or "").strip()
+            if value:
+                lines.append(f"- {key}: {_truncate(value, 1000)}")
+        notes = _nonempty(method.get("method_routing_notes"), limit=8)
+        if notes:
+            lines.append("- method_routing_notes:")
+            lines.extend(f"  - {_truncate(x, 800)}" for x in notes)
+        lines.append("")
 
     evaluation = pack.get("evaluation_contract") if isinstance(pack.get("evaluation_contract"), dict) else {}
     if evaluation:
@@ -293,13 +412,21 @@ def build_autorealize_context_md(input_dir: Path, *, write_context_file: bool = 
     """
     contracts = _load_contracts(Path(input_dir))
     existing_md = str(contracts.get("automl_md") or "").strip()
+    text = ""
     if existing_md:
         text = existing_md if CONTEXT_MARKER in existing_md else f"## {CONTEXT_MARKER}\n\n{existing_md}"
-    elif isinstance(contracts.get("automl_pack"), dict) and contracts["automl_pack"]:
+        logger.info("Using AutoRealize automl_context.md directly (%s chars).", len(existing_md))
+    if not text and _pack_is_prompt_ready(contracts.get("automl_pack")):
         text = _render_from_pack(contracts["automl_pack"])
-    else:
-        text = _render_fallback(contracts)
-        text = text if len(text.splitlines()) > 6 else ""
+    if not text:
+        fallback = _render_fallback(contracts)
+        if _markdown_is_prompt_ready(fallback):
+            text = fallback
+        elif any(contracts.get(k) for k in ["bundle", "evaluation_report", "data_access", "problem", "agent_pack"]):
+            logger.warning(
+                "AutoRealize artifacts exist but are not prompt-ready for MLEvolve; "
+                "standalone data preview remains enabled."
+            )
     if text and write_context_file:
         try:
             (Path(input_dir) / "autorealize_context.md").write_text(text + "\n", encoding="utf-8")

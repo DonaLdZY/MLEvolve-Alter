@@ -52,8 +52,15 @@ def test_log_llm_usage_writes_jsonl_summary_and_prompt_parts(tmp_path):
     assert summary["calls"] == 1
     assert summary["prompt_tokens"] == 120
     assert summary["provider_cache_hit_ratio"] == round(80 / 120, 6)
+    assert summary["deepseek_cost_breakdown_rmb"]["cache_miss_input_tokens"] == 40
+    assert summary["deepseek_cost_breakdown_rmb"]["output_tokens"] == 12
     assert summary["by_prompt"]["draft_agent"]["by_part"]["task_context"]["estimated_tokens"] > 0
     assert summary["by_prompt_part_ranked"][0]["estimated_tokens"] >= summary["by_prompt_part_ranked"][-1]["estimated_tokens"]
+    brief = json.loads((tmp_path / "llm_usage_brief.json").read_text(encoding="utf-8"))
+    assert brief["deepseek_pricing_rmb_per_1m"]["cache_miss_input"] == 3.0
+    assert brief["deepseek_cost_breakdown_rmb"]["output_tokens"] == 12
+    assert brief["top_prompts_by_estimated_cost"][0]["stage"] == "draft_or_code_generation"
+    assert brief["by_stage"][0]["stage"] == "draft_or_code_generation"
 
 
 def test_log_llm_usage_marks_missing_provider_usage(tmp_path):

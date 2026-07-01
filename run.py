@@ -1,11 +1,14 @@
 import atexit
+import json
 import logging
 import os
 import shutil
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from types import SimpleNamespace
 from typing import Optional
 
 import torch
@@ -17,10 +20,126 @@ from engine.agent_search import AgentSearch as Agent
 from engine.coldstart import build_guidance_description
 from engine.executor import Interpreter
 from engine.search_node import Journal
+from agents.prompts import is_optimization_or_rl_task
 from utils.seed import set_global_seed
 from utils.logging_config import setup_logging
 from utils.visualization import journal_to_string_tree
 from utils.serialize import load_json
+
+
+PENDING_NODES_FILE = "pending_nodes.json"
+PENDING_DRAFT_STATUSES = {"generating", "pending_execution", "executing", "cancelled", "failed"}
+
+
+def _node_attr(node, name: str, default=None):
+    if isinstance(node, dict):
+        return node.get(name, default)
+    return getattr(node, name, default)
+
+
+def _pending_node_row(node, status: str) -> dict:
+    parent = _node_attr(node, "parent", None)
+    metric = _node_attr(node, "metric", None)
+    metric_value = getattr(metric, "value", None) if metric is not None else None
+    metric_maximize = getattr(metric, "maximize", None) if metric is not None else None
+    return {
+        "id": str(_node_attr(node, "id", "")),
+        "parent_id": _node_attr(node, "parent_id", None) or getattr(parent, "id", None),
+        "stage": _node_attr(node, "stage", "draft"),
+        "plan": _node_attr(node, "plan", None),
+        "code": _node_attr(node, "code", None),
+        "result": "",
+        "insight": _node_attr(node, "llm_insight", None) or _node_attr(node, "analysis", None),
+        "llm_insight": _node_attr(node, "llm_insight", None),
+        "parser_analysis": _node_attr(node, "parser_analysis", None) or _node_attr(node, "analysis", None),
+        "decision_signals": _node_attr(node, "decision_signals", None),
+        "metric": metric_value,
+        "maximize": metric_maximize if isinstance(metric_maximize, bool) else None,
+        "is_buggy": _node_attr(node, "is_buggy", None),
+        "is_valid": _node_attr(node, "is_valid", None),
+        "visits": _node_attr(node, "visits", 0),
+        "total_reward": _node_attr(node, "total_reward", 0.0),
+        "uct": _node_attr(node, "_uct", None),
+        "finish_time": _node_attr(node, "finish_time", None),
+        "exec_time": _node_attr(node, "exec_time", None),
+        "branch_id": _node_attr(node, "branch_id", None),
+        "from_topk": _node_attr(node, "from_topk", None),
+        "created_time": _node_attr(node, "created_time", None),
+        "status": status,
+        "pending_execution": status in {"generating", "pending_execution", "executing"},
+        "label": {
+            "generating": "Draft code is being generated",
+            "pending_execution": "Draft generated, pending execution",
+            "executing": "Draft execution is running",
+            "cancelled": "Draft execution was cancelled before journal append",
+            "failed": "Draft generation failed before execution",
+        }.get(status, status),
+    }
+
+
+def _make_pending_draft_placeholder(draft_idx: int, draft_total: int, *, fast_first: bool) -> SimpleNamespace:
+    mode = "fast_first_draft" if fast_first else "stepwise_draft"
+    return SimpleNamespace(
+        id=f"draft-{draft_idx + 1}-generating",
+        parent=None,
+        parent_id=None,
+        stage="draft",
+        plan=(
+            f"Generating draft {draft_idx + 1}/{draft_total} via {mode}. "
+            "This placeholder is shown before code generation finishes."
+        ),
+        code="",
+        analysis=None,
+        parser_analysis=None,
+        decision_signals=None,
+        llm_insight=None,
+        metric=None,
+        is_buggy=None,
+        is_valid=None,
+        visits=0,
+        total_reward=0.0,
+        _uct=None,
+        finish_time=None,
+        exec_time=None,
+        branch_id=draft_idx + 1,
+        from_topk=False,
+        created_time=time.strftime("%Y-%m-%dT%H:%M:%S"),
+    )
+
+
+def _write_pending_nodes_state(log_dir, nodes, status_by_id: dict[str, str], phase: str) -> None:
+    path = log_dir / PENDING_NODES_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for node in nodes:
+        node_id = str(getattr(node, "id", ""))
+        status = status_by_id.get(node_id)
+        if status:
+            rows.append(_pending_node_row(node, status))
+    payload = {
+        "schema_version": "mlevolve.pending_nodes.v1",
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "phase": phase,
+        "nodes": rows,
+    }
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    last_error: Exception | None = None
+    for attempt in range(5):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            time.sleep(0.05 * (attempt + 1))
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp_path.unlink(missing_ok=True)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        if last_error is not None:
+            raise last_error
+        raise
 
 
 def run():
@@ -111,6 +230,17 @@ def run():
     max_workers = interpreter.max_parallel_run
     total_steps = cfg.agent.steps
     initial_draft_count = cfg.agent.initial_drafts
+    optimization_or_rl_task = is_optimization_or_rl_task(
+        task_desc=str(getattr(agent, "task_desc", "") or task_desc or ""),
+        coldstart_description=str(getattr(agent, "coldstart_description", "") or ""),
+    )
+    if optimization_or_rl_task and initial_draft_count > 1:
+        logger.info(
+            "Optimization/RL task detected; reducing Phase 1 initial_drafts from %s to 1 "
+            "so the first executable search node appears sooner.",
+            initial_draft_count,
+        )
+        initial_draft_count = 1
 
     time_limit_secs = int(getattr(cfg.agent, "time_limit", 0) or 0)
     run_deadline: Optional[float] = time.time() + time_limit_secs if time_limit_secs > 0 else None
@@ -118,6 +248,7 @@ def run():
 
     logger.info(f"ThreadPool max_workers set to: {max_workers} (matching interpreter capacity)")
     logger.info(f"Initial draft count: {initial_draft_count} (executed sequentially for diversity)")
+    logger.info("Phase 1 fast_first_draft is enabled: draft 1 uses single-call generation before stepwise drafts.")
     if run_deadline is not None:
         logger.info(f"Hard timeout enabled: {time_limit_secs}s")
 
@@ -128,33 +259,71 @@ def run():
     logger.info(f"Resume progress: completed={completed}/{total_steps} from journal nodes={len(journal)}")
 
     pending_draft_nodes = []
+    pending_status_by_id: dict[str, str] = {}
+    _write_pending_nodes_state(cfg.log_dir, pending_draft_nodes, pending_status_by_id, "initialized")
+
+    def refresh_pending_nodes_state(phase: str) -> None:
+        try:
+            _write_pending_nodes_state(cfg.log_dir, pending_draft_nodes, pending_status_by_id, phase)
+        except Exception as exc:
+            logger.warning(f"Failed to write {PENDING_NODES_FILE}: {exc}")
+
     if initial_draft_count > 0 and completed == 0 and total_steps > 0:
         logger.info(f"Phase 1: Sequential draft generation (code only, {initial_draft_count} drafts)")
 
-        def step_task_generate_only():
-            logger.info("[step_task_generate_only] Generating draft from virtual root")
-            return agent.step(exec_callback=exec_callback, node=None, execute_immediately=False)
+        def step_task_generate_only(*, fast_first_draft: bool = False):
+            logger.info(
+                "[step_task_generate_only] Generating draft from virtual root%s",
+                " using fast_first_draft single-call route" if fast_first_draft else "",
+            )
+            previous_stepwise = getattr(agent, "use_stepwise_generation", True)
+            if fast_first_draft:
+                agent.use_stepwise_generation = False
+            try:
+                return agent.step(exec_callback=exec_callback, node=None, execute_immediately=False)
+            finally:
+                agent.use_stepwise_generation = previous_stepwise
 
-        for draft_idx in range(min(initial_draft_count, total_steps)):
+        draft_total = min(initial_draft_count, total_steps)
+        for draft_idx in range(draft_total):
             if is_timed_out():
                 timed_out = True
                 logger.warning("Time limit reached during Phase 1 draft generation; stop creating new drafts.")
                 break
+            fast_first_draft = draft_idx == 0
+            placeholder = _make_pending_draft_placeholder(
+                draft_idx,
+                draft_total,
+                fast_first=fast_first_draft,
+            )
+            pending_draft_nodes.append(placeholder)
+            pending_status_by_id[placeholder.id] = "generating"
+            refresh_pending_nodes_state("phase1_draft_generation")
             try:
                 logger.info(
                     f"Generating draft {draft_idx + 1}/{min(initial_draft_count, total_steps)} (code only)"
                 )
-                cur_node = step_task_generate_only()
-                pending_draft_nodes.append(cur_node)
+                cur_node = step_task_generate_only(fast_first_draft=fast_first_draft)
+                pending_draft_nodes[-1] = cur_node
+                pending_status_by_id.pop(placeholder.id, None)
+                pending_status_by_id[cur_node.id] = "pending_execution"
+                refresh_pending_nodes_state("phase1_draft_generation")
                 logger.info(f"Draft {draft_idx + 1} code generated: node.id={cur_node.id}")
             except Exception as e:
+                pending_status_by_id[placeholder.id] = "failed"
+                refresh_pending_nodes_state("phase1_draft_generation")
                 logger.exception(f"Exception during draft {draft_idx + 1} generation: {e}")
 
         logger.info(f"Phase 1 complete: {len(pending_draft_nodes)} draft codes generated")
+        refresh_pending_nodes_state("phase1_draft_generation_complete")
 
     if pending_draft_nodes or completed < total_steps:
+        drafts_to_execute = [
+            node for node in pending_draft_nodes
+            if pending_status_by_id.get(str(_node_attr(node, "id", ""))) == "pending_execution"
+        ]
         logger.info("Phase 2: Pipelined parallel execution")
-        logger.info(f"  - Pending draft executions: {len(pending_draft_nodes)}")
+        logger.info(f"  - Pending draft executions: {len(drafts_to_execute)}")
         logger.info(f"  - Remaining steps: {total_steps - completed}")
 
         def execute_draft_node(node):
@@ -171,16 +340,21 @@ def run():
         fast_shutdown = False
         try:
             futures = set()
+            pending_future_ids: dict = {}
             submitted_drafts = 0
-            for i, node in enumerate(pending_draft_nodes):
+            for i, node in enumerate(drafts_to_execute):
                 if is_timed_out():
                     timed_out = True
                     logger.warning("Time limit reached before submitting pending draft executions.")
                     break
-                futures.add(executor.submit(execute_draft_node, node))
+                pending_status_by_id[node.id] = "executing"
+                refresh_pending_nodes_state("phase2_execution")
+                fut = executor.submit(execute_draft_node, node)
+                futures.add(fut)
+                pending_future_ids[fut] = node.id
                 submitted_drafts += 1
                 logger.info(f"Submitted draft execution: {node.id}")
-                if i < len(pending_draft_nodes) - 1:
+                if i < len(drafts_to_execute) - 1:
                     time.sleep(10)
                     if is_timed_out():
                         timed_out = True
@@ -210,6 +384,7 @@ def run():
 
                 for fut in done:
                     futures.remove(fut)
+                    pending_node_id = pending_future_ids.pop(fut, None)
                     try:
                         cur_node = fut.result()
                         if cur_node:
@@ -228,6 +403,13 @@ def run():
                         completed = len(journal) - 1
                         if completed == total_steps:
                             logger.info(journal_to_string_tree(journal))
+
+                        if pending_node_id and cur_node:
+                            pending_status_by_id.pop(pending_node_id, None)
+                            refresh_pending_nodes_state("phase2_execution")
+                        elif pending_node_id:
+                            pending_status_by_id[pending_node_id] = "failed"
+                            refresh_pending_nodes_state("phase2_execution")
 
                     if completed + len(futures) < total_steps and not timed_out:
                         if is_timed_out():
@@ -248,6 +430,9 @@ def run():
                 interpreter.terminate_all_subprocesses()
                 fast_shutdown = True
                 with lock:
+                    for node_id in list(pending_status_by_id):
+                        pending_status_by_id[node_id] = "cancelled"
+                    refresh_pending_nodes_state("timed_out")
                     save_run(cfg, journal)
             elif completed < total_steps and not futures:
                 logger.warning(
@@ -256,6 +441,9 @@ def run():
         except KeyboardInterrupt:
             interrupted = True
             logger.info("KeyboardInterrupt received, terminating subprocesses and shutting down...")
+            for node_id in list(pending_status_by_id):
+                pending_status_by_id[node_id] = "cancelled"
+            refresh_pending_nodes_state("interrupted")
             interpreter.terminate_all_subprocesses()
             if sys.version_info >= (3, 9):
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -277,6 +465,9 @@ def run():
 
     if timed_out:
         logger.error(f"MLEvolve stopped by hard timeout: {time_limit_secs}s")
+
+    if not pending_status_by_id:
+        refresh_pending_nodes_state("complete")
 
     interpreter.cleanup_session(-1)
 

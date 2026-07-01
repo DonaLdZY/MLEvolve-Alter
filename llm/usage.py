@@ -13,6 +13,9 @@ logger = logging.getLogger("MLEvolve")
 
 _LOCK = threading.Lock()
 _SUMMARIES: dict[str, dict[str, Any]] = {}
+DEEPSEEK_RMB_PER_1M_CACHE_HIT_INPUT = 0.025
+DEEPSEEK_RMB_PER_1M_CACHE_MISS_INPUT = 3.0
+DEEPSEEK_RMB_PER_1M_OUTPUT = 6.0
 
 
 def usage_paths(cfg: Any) -> tuple[Path | None, Path | None]:
@@ -21,6 +24,72 @@ def usage_paths(cfg: Any) -> tuple[Path | None, Path | None]:
         return None, None
     root = Path(log_dir)
     return root / "llm_usage.jsonl", root / "llm_usage_summary.json"
+
+
+def _is_deepseek_model(model_name: str) -> bool:
+    return (model_name or "").strip().lower().startswith("deepseek")
+
+
+def _estimate_deepseek_rmb(
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+    miss_tokens: int,
+    completion_tokens: int,
+    unknown_prompt_as_miss: bool,
+) -> float:
+    unknown_prompt_tokens = max(0, prompt_tokens - cached_tokens - miss_tokens)
+    billed_miss_tokens = miss_tokens + (unknown_prompt_tokens if unknown_prompt_as_miss else 0)
+    return (
+        cached_tokens * DEEPSEEK_RMB_PER_1M_CACHE_HIT_INPUT
+        + billed_miss_tokens * DEEPSEEK_RMB_PER_1M_CACHE_MISS_INPUT
+        + completion_tokens * DEEPSEEK_RMB_PER_1M_OUTPUT
+    ) / 1_000_000.0
+
+
+def _deepseek_cost_breakdown(
+    *,
+    prompt_tokens: int,
+    cached_tokens: int,
+    miss_tokens: int,
+    completion_tokens: int,
+) -> dict[str, float | int]:
+    unknown_prompt_tokens = max(0, int(prompt_tokens) - int(cached_tokens) - int(miss_tokens))
+    cache_hit_rmb = int(cached_tokens) * DEEPSEEK_RMB_PER_1M_CACHE_HIT_INPUT / 1_000_000.0
+    cache_miss_rmb = int(miss_tokens) * DEEPSEEK_RMB_PER_1M_CACHE_MISS_INPUT / 1_000_000.0
+    unknown_as_miss_rmb = unknown_prompt_tokens * DEEPSEEK_RMB_PER_1M_CACHE_MISS_INPUT / 1_000_000.0
+    output_rmb = int(completion_tokens) * DEEPSEEK_RMB_PER_1M_OUTPUT / 1_000_000.0
+    return {
+        "cache_hit_input_tokens": int(cached_tokens),
+        "cache_miss_input_tokens": int(miss_tokens),
+        "unknown_input_tokens": unknown_prompt_tokens,
+        "output_tokens": int(completion_tokens),
+        "cache_hit_input_rmb": round(cache_hit_rmb, 6),
+        "cache_miss_input_rmb": round(cache_miss_rmb, 6),
+        "unknown_input_as_miss_rmb": round(unknown_as_miss_rmb, 6),
+        "output_rmb": round(output_rmb, 6),
+        "total_cache_known_only_rmb": round(cache_hit_rmb + cache_miss_rmb + output_rmb, 6),
+        "total_unknown_as_miss_rmb": round(cache_hit_rmb + cache_miss_rmb + unknown_as_miss_rmb + output_rmb, 6),
+    }
+
+
+def _prompt_stage(prompt_name: str) -> str:
+    name = (prompt_name or "").strip().lower()
+    if "draft" in name or "initial" in name or "coder" in name or "codegen" in name:
+        return "draft_or_code_generation"
+    if "debug" in name or "repair" in name or "fix" in name:
+        return "debug_repair"
+    if "improve" in name or "evolution" in name or "mutate" in name:
+        return "search_improvement"
+    if "fusion" in name or "aggregation" in name or "ensemble" in name:
+        return "fusion_aggregation"
+    if "feedback" in name or "review" in name or "critic" in name:
+        return "feedback_review"
+    if "validation" in name or "quality" in name or "submission" in name or "grade" in name:
+        return "validation_submission"
+    if "cold" in name or "start" in name:
+        return "cold_start"
+    return "other"
 
 
 def infer_prompt_name(prefix: str) -> str:
@@ -176,6 +245,7 @@ def prompt_parts_from_messages(messages: list[dict[str, Any]] | None) -> list[di
 def _new_summary() -> dict[str, Any]:
     return {
         "calls": 0,
+        "seconds": 0.0,
         "prompt_tokens": 0,
         "completion_tokens": 0,
         "total_tokens": 0,
@@ -247,12 +317,46 @@ def _write_summary(path: Path, summary: dict[str, Any]) -> None:
     prompt_tokens = int(out.get("prompt_tokens", 0) or 0)
     cached = int(out.get("prompt_cache_hit_tokens", 0) or 0)
     missed = int(out.get("prompt_cache_miss_tokens", 0) or 0)
+    completion_tokens = int(out.get("completion_tokens", 0) or 0)
     known_prompt_tokens = int(out.get("provider_cache_known_prompt_tokens", 0) or 0)
     estimated_prompt_tokens = int(out.get("estimated_prompt_tokens", 0) or 0)
     out["provider_cache_hit_ratio"] = round(cached / prompt_tokens, 6) if prompt_tokens else 0.0
     out["provider_cache_miss_ratio"] = round(missed / prompt_tokens, 6) if prompt_tokens else 0.0
     out["known_provider_cache_hit_ratio"] = round(cached / known_prompt_tokens, 6) if known_prompt_tokens else 0.0
     out["known_provider_cache_miss_ratio"] = round(missed / known_prompt_tokens, 6) if known_prompt_tokens else 0.0
+    model_name = _summary_model_name(out)
+    if _is_deepseek_model(model_name):
+        out["deepseek_pricing_rmb_per_1m"] = {
+            "cache_hit_input": DEEPSEEK_RMB_PER_1M_CACHE_HIT_INPUT,
+            "cache_miss_input": DEEPSEEK_RMB_PER_1M_CACHE_MISS_INPUT,
+            "output": DEEPSEEK_RMB_PER_1M_OUTPUT,
+        }
+        out["deepseek_cost_breakdown_rmb"] = _deepseek_cost_breakdown(
+            prompt_tokens=prompt_tokens,
+            cached_tokens=cached,
+            miss_tokens=missed,
+            completion_tokens=completion_tokens,
+        )
+        out["estimated_deepseek_rmb_cache_known_only"] = round(
+            _estimate_deepseek_rmb(
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached,
+                miss_tokens=missed,
+                completion_tokens=completion_tokens,
+                unknown_prompt_as_miss=False,
+            ),
+            6,
+        )
+        out["estimated_deepseek_rmb_unknown_prompt_as_miss"] = round(
+            _estimate_deepseek_rmb(
+                prompt_tokens=prompt_tokens,
+                cached_tokens=cached,
+                miss_tokens=missed,
+                completion_tokens=completion_tokens,
+                unknown_prompt_as_miss=True,
+            ),
+            6,
+        )
     by_part = out.get("by_prompt_part", {})
     if isinstance(by_part, dict):
         ranked = sorted(by_part.values(), key=lambda x: int(x.get("estimated_tokens", 0) or 0), reverse=True)
@@ -263,6 +367,37 @@ def _write_summary(path: Path, summary: dict[str, Any]) -> None:
     by_prompt = out.get("by_prompt", {})
     if isinstance(by_prompt, dict):
         for item in by_prompt.values():
+            if _is_deepseek_model(model_name):
+                prompt_prompt_tokens = int(item.get("prompt_tokens", 0) or 0)
+                prompt_cached = int(item.get("prompt_cache_hit_tokens", 0) or 0)
+                prompt_missed = int(item.get("prompt_cache_miss_tokens", 0) or 0)
+                prompt_completion = int(item.get("completion_tokens", 0) or 0)
+                item["deepseek_cost_breakdown_rmb"] = _deepseek_cost_breakdown(
+                    prompt_tokens=prompt_prompt_tokens,
+                    cached_tokens=prompt_cached,
+                    miss_tokens=prompt_missed,
+                    completion_tokens=prompt_completion,
+                )
+                item["estimated_deepseek_rmb_cache_known_only"] = round(
+                    _estimate_deepseek_rmb(
+                        prompt_tokens=prompt_prompt_tokens,
+                        cached_tokens=prompt_cached,
+                        miss_tokens=prompt_missed,
+                        completion_tokens=prompt_completion,
+                        unknown_prompt_as_miss=False,
+                    ),
+                    6,
+                )
+                item["estimated_deepseek_rmb_unknown_prompt_as_miss"] = round(
+                    _estimate_deepseek_rmb(
+                        prompt_tokens=prompt_prompt_tokens,
+                        cached_tokens=prompt_cached,
+                        miss_tokens=prompt_missed,
+                        completion_tokens=prompt_completion,
+                        unknown_prompt_as_miss=True,
+                    ),
+                    6,
+                )
             prompt_est = int(item.get("estimated_prompt_tokens", 0) or 0)
             parts = item.get("by_part", {})
             if isinstance(parts, dict):
@@ -273,6 +408,116 @@ def _write_summary(path: Path, summary: dict[str, Any]) -> None:
                 item["by_part_ranked"] = ranked
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    brief_path = path.with_name("llm_usage_brief.json")
+    brief_path.write_text(json.dumps(_build_usage_brief(out, model_name=model_name), ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def _summary_model_name(summary: dict[str, Any]) -> str:
+    by_prompt = summary.get("by_prompt", {})
+    if isinstance(by_prompt, dict):
+        for item in by_prompt.values():
+            if isinstance(item, dict) and item.get("model"):
+                return str(item.get("model"))
+    return str(summary.get("model", ""))
+
+
+def _build_usage_brief(summary: dict[str, Any], *, model_name: str) -> dict[str, Any]:
+    by_prompt = summary.get("by_prompt", {})
+    prompt_rows = []
+    if isinstance(by_prompt, dict):
+        for name, item in by_prompt.items():
+            if not isinstance(item, dict):
+                continue
+            prompt_rows.append(
+                {
+                    "prompt_name": name,
+                    "stage": _prompt_stage(str(name)),
+                    "calls": int(item.get("calls", 0) or 0),
+                    "seconds": round(float(item.get("seconds", 0.0) or 0.0), 4),
+                    "input_tokens": int(item.get("prompt_tokens", 0) or 0),
+                    "cache_hit_tokens": int(item.get("prompt_cache_hit_tokens", 0) or 0),
+                    "cache_miss_tokens": int(item.get("prompt_cache_miss_tokens", 0) or 0),
+                    "unknown_input_tokens": int(
+                        (item.get("deepseek_cost_breakdown_rmb") or {}).get("unknown_input_tokens", 0)
+                        if isinstance(item.get("deepseek_cost_breakdown_rmb"), dict)
+                        else 0
+                    ),
+                    "output_tokens": int(item.get("completion_tokens", 0) or 0),
+                    "deepseek_cost_breakdown_rmb": (
+                        item.get("deepseek_cost_breakdown_rmb")
+                        if isinstance(item.get("deepseek_cost_breakdown_rmb"), dict)
+                        else {}
+                    ),
+                    "estimated_deepseek_rmb": item.get("estimated_deepseek_rmb_unknown_prompt_as_miss"),
+                }
+            )
+    prompt_rows.sort(
+        key=lambda row: (
+            float(row.get("estimated_deepseek_rmb") or 0.0),
+            int(row.get("cache_miss_tokens", 0) or 0),
+            int(row.get("output_tokens", 0) or 0),
+        ),
+        reverse=True,
+    )
+    stage_rows_by_name: dict[str, dict[str, Any]] = {}
+    for row in prompt_rows:
+        stage = str(row.get("stage") or "other")
+        item = stage_rows_by_name.setdefault(
+            stage,
+            {
+                "stage": stage,
+                "calls": 0,
+                "seconds": 0.0,
+                "input_tokens": 0,
+                "cache_hit_tokens": 0,
+                "cache_miss_tokens": 0,
+                "unknown_input_tokens": 0,
+                "output_tokens": 0,
+                "estimated_deepseek_rmb": 0.0,
+            },
+        )
+        item["calls"] = int(item.get("calls", 0)) + int(row.get("calls", 0) or 0)
+        item["seconds"] = round(float(item.get("seconds", 0.0) or 0.0) + float(row.get("seconds", 0.0) or 0.0), 4)
+        for key in [
+            "input_tokens",
+            "cache_hit_tokens",
+            "cache_miss_tokens",
+            "unknown_input_tokens",
+            "output_tokens",
+        ]:
+            item[key] = int(item.get(key, 0)) + int(row.get(key, 0) or 0)
+        item["estimated_deepseek_rmb"] = round(
+            float(item.get("estimated_deepseek_rmb", 0.0) or 0.0)
+            + float(row.get("estimated_deepseek_rmb", 0.0) or 0.0),
+            6,
+        )
+    stage_rows = sorted(
+        stage_rows_by_name.values(),
+        key=lambda row: (
+            float(row.get("estimated_deepseek_rmb") or 0.0),
+            int(row.get("cache_miss_tokens", 0) or 0),
+            int(row.get("output_tokens", 0) or 0),
+        ),
+        reverse=True,
+    )
+    return {
+        "schema_version": "mlevolve.llm_usage_brief.v1",
+        "model": model_name,
+        "calls": int(summary.get("calls", 0) or 0),
+        "llm_seconds": round(float(summary.get("seconds", 0.0) or 0.0), 4),
+        "input_tokens": int(summary.get("prompt_tokens", 0) or 0),
+        "cache_hit_tokens": int(summary.get("prompt_cache_hit_tokens", 0) or 0),
+        "cache_miss_tokens": int(summary.get("prompt_cache_miss_tokens", 0) or 0),
+        "output_tokens": int(summary.get("completion_tokens", 0) or 0),
+        "provider_cache_hit_ratio": summary.get("provider_cache_hit_ratio", 0.0),
+        "provider_cache_miss_ratio": summary.get("provider_cache_miss_ratio", 0.0),
+        "estimated_deepseek_rmb_cache_known_only": summary.get("estimated_deepseek_rmb_cache_known_only"),
+        "estimated_deepseek_rmb_unknown_prompt_as_miss": summary.get("estimated_deepseek_rmb_unknown_prompt_as_miss"),
+        "deepseek_cost_breakdown_rmb": summary.get("deepseek_cost_breakdown_rmb", {}),
+        "deepseek_pricing_rmb_per_1m": summary.get("deepseek_pricing_rmb_per_1m", {}),
+        "by_stage": stage_rows,
+        "top_prompts_by_estimated_cost": prompt_rows[:20],
+    }
 
 
 def log_llm_usage(
@@ -335,6 +580,8 @@ def log_llm_usage(
             f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         summary = _summary_for(summary_path)
         summary["calls"] = int(summary.get("calls", 0)) + 1
+        summary["seconds"] = round(float(summary.get("seconds", 0.0) or 0.0) + float(seconds or 0.0), 4)
+        summary["model"] = model
         if not usage_available:
             summary["provider_usage_missing_calls"] = int(summary.get("provider_usage_missing_calls", 0)) + 1
         for key in ["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"]:
@@ -349,6 +596,8 @@ def log_llm_usage(
             prompt_name,
             {
                 "calls": 0,
+                "seconds": 0.0,
+                "model": model,
                 "prompt_tokens": 0,
                 "completion_tokens": 0,
                 "total_tokens": 0,
@@ -363,6 +612,8 @@ def log_llm_usage(
             },
         )
         item["calls"] = int(item.get("calls", 0)) + 1
+        item["seconds"] = round(float(item.get("seconds", 0.0) or 0.0) + float(seconds or 0.0), 4)
+        item["model"] = model
         if not usage_available:
             item["provider_usage_missing_calls"] = int(item.get("provider_usage_missing_calls", 0)) + 1
         for key in ["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"]:

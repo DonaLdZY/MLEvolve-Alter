@@ -15,6 +15,7 @@ from agents.prompts import (
     prompt_resp_fmt,
     get_prompt_environment,
     get_impl_guideline_from_agent,
+    is_optimization_or_rl_task,
 )
 from agents.planner import build_chat_prompt_for_model
 from agents.prompt_cache import dataset_reference_sentence, task_section
@@ -53,6 +54,21 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
         "✓ Compete for TOP performance, not trivial baselines\n\n"
         "Your solution will be evaluated on a real leaderboard. Treat this with professionalism.\n\n"
     )
+
+    optimization_or_rl = is_optimization_or_rl_task(
+        task_desc=getattr(agent, "task_desc", ""),
+        coldstart_description=getattr(agent, "coldstart_description", ""),
+    )
+    if optimization_or_rl:
+        professional_identity = (
+            "You are an expert competition solver for optimization, reinforcement learning, and decision problems.\n\n"
+            "**Your Standards**:\n"
+            "- Freeze the official objective, output schema, and hard constraints before optimizing.\n"
+            "- Build a real feasible solution/action plan, not placeholder predictions.\n"
+            "- Validate feasibility with deterministic checks and report one official scalar score.\n"
+            "- For the first runnable draft, prefer a deterministic greedy/repair/local-search or OR baseline; use RL as a later comparable branch unless the task has an official interactive environment.\n\n"
+            "Your solution will be evaluated on a real leaderboard. Treat this with professionalism.\n\n"
+        )
 
     introduction = (
         professional_identity +
@@ -111,9 +127,13 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
             "  • **Think**: 'Does my approach explore a fundamentally different hypothesis?' If NO → redesign.\n",
             "- Don't propose the same modelling solution but keep the evaluation the same.\n",
             "- Your plan should be concise but comprehensive: Must address WHAT/WHY/HOW (2-4 sentences each). Avoid verbosity - every sentence should add new insight. Natural length: around 8-12 sentences for a complete reasoning process.\n",
-            "- Propose an evaluation metric that is reasonable for this task.\n",
+            "- Use the task description / AutoRealize context evaluation metric exactly. Do not invent a separate metric; if the metric is incomplete, implement the most conservative supported scalar and make the assumption explicit.\n",
             "- Don't suggest to do EDA.\n",
             "- The data is already prepared in `./input` directory. No need to unzip files.\n",
+            "- If AutoRealize context contains an Exact Source Schema Contract, use its exact `sheet_name` and `physical_columns_exact` strings for all pandas reads. Business concepts or English variable names are code-local derived variables, not raw dataframe column names.\n",
+            "- When a description concept is not an exact physical column, resolve it against actual columns before use and keep the mapping near the load code. Never call `groupby`, `agg`, joins, or filters on a column name that is absent from `df.columns`.\n",
+            "- Before `groupby`, `agg`, merge, filter, or sort, bind each business concept to a resolved exact source column variable. Create semantic aliases only after exact source access, not as guessed raw column names.\n",
+            "- For decision/optimization tasks, first define the evaluation population. Do not silently drop rows/orders because one date/time/feature field is missing; if the task contract defines an evaluable subset or exclusion rule, apply it explicitly and report excluded counts/examples, otherwise use a documented fallback field, an UNKNOWN/default bucket, or validation details.\n",
         ],
         "Coding & Execution Guidelines (CRITICAL)": [
             "- **NO PROGRESS BARS**: You MUST NOT use `tqdm`. Assume `tqdm` is not installed. Use standard Python loops only. Do not use `verbose=1`.",
@@ -121,6 +141,18 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
             "- **FINAL OUTPUT**: The VERY LAST line of execution MUST be `print(f'Final Validation Score: {score}')`. This is required for the score parser."
         ]
     }
+    if optimization_or_rl:
+        prompt["Instructions"]["Solution sketch guideline"].extend(
+            [
+                "- FIRST DRAFT POLICY for optimization/RL-like tasks: implement a deterministic baseline before expensive learning. Build `load_problem_data`, `validate_solution`, `score_solution`, evaluator self-tests, and a greedy/repair/local-search solver that produces a real solution artifact or partial solution.\n",
+                "- Do NOT make the first draft depend on successful PPO/DQN/neural RL training. If RL is requested, leave clear extension points (`Environment`, action mask, reward tied to `score_solution`) but still run and score the deterministic baseline in this draft.\n",
+                "- Candidate generation must mask illegal actions before scoring/selection whenever constraints are known. Use the task's exact entities, feasibility rules, resource availability, capacity, time/budget limits, uniqueness rules, and other hard constraints before choosing any action.\n",
+                "- If no legal action exists for an item/job/state, handle it as a first-class branch according to the task contract: mark it infeasible/undecided when allowed, try an allowed repair/new-resource/backtracking fallback, and include task-defined counts/examples in `Decision Validation Summary`. Never pick an illegal action just to avoid an empty candidate set.\n",
+                "- A partial, infeasible, empty, or diagnostic solution may still be useful if it is scored by the official deterministic evaluator/formula and the limitations are explicit.\n",
+                "- If you print `Decision Validation Summary`, keep it task-appropriate: objective components, validator status, and short examples for the dominant failure reason. It is diagnostic only; the parser accepts nodes by the final scalar score.\n",
+                "- The first draft should maximize the chance of producing a retained search-tree node, then later improve/debug nodes can add RL, CP-SAT/MILP, richer local search, or learned scoring.\n",
+            ]
+        )
     prompt["Instructions"] |= get_impl_guideline_from_agent(agent)
     prompt["Instructions"] |= prompt_leakage_prevention()
 

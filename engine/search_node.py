@@ -2,6 +2,7 @@
 
 import copy
 import difflib
+import json
 import logging
 import math
 import threading
@@ -44,6 +45,9 @@ class SearchNode(DataClassJsonMixin):
 
     # ---- evaluation ----
     analysis: str = field(default=None, kw_only=True)  # type: ignore
+    parser_analysis: str | None = field(default=None, kw_only=True)
+    decision_signals: dict | None = field(default=None, kw_only=True)
+    llm_insight: str | None = field(default=None, kw_only=True)
     metric: MetricValue = field(default=None, kw_only=True)  # type: ignore
     is_buggy: bool = field(default=None, kw_only=True)  # type: ignore
     is_valid: bool = field(default=None, kw_only=True)  # type: ignore
@@ -100,6 +104,32 @@ class SearchNode(DataClassJsonMixin):
     @property
     def term_out(self) -> str:
         return trim_long_string("".join(self._term_out))
+
+    @property
+    def display_insight(self) -> str | None:
+        """Human-facing node insight for UI display."""
+        return self.llm_insight or self.analysis
+
+    @property
+    def analysis_for_prompt(self) -> str:
+        """Provider-friendly diagnostic context for downstream coding agents.
+
+        Keep deterministic parser facts authoritative, and include LLM insight
+        as interpretation rather than as the source of truth.
+        """
+        parts: list[str] = []
+        parser_text = self.parser_analysis or self.analysis
+        if parser_text:
+            parts.append(f"Parser diagnostics: {trim_long_string(str(parser_text), threshold=1800, k=900)}")
+        if self.decision_signals:
+            try:
+                signals = json.dumps(self.decision_signals, ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                signals = str(self.decision_signals)
+            parts.append(f"Decision signals: {trim_long_string(signals, threshold=1200, k=600)}")
+        if self.llm_insight:
+            parts.append(f"LLM insight: {trim_long_string(str(self.llm_insight), threshold=900, k=450)}")
+        return "\n".join(parts) if parts else "N/A"
 
     @property
     def is_leaf(self) -> bool:
@@ -225,8 +255,9 @@ class SearchNode(DataClassJsonMixin):
                 summary_part += f"Results: The implementation of this design has bugs.\n"
                 summary_part += f"Insight: Using a different approach may not result in the same bugs as the above approach.\n"
             else:
-                if n.analysis:
-                    summary_part += f"Results: {n.analysis}\n"
+                node_analysis = n.analysis_for_prompt
+                if node_analysis and node_analysis != "N/A":
+                    summary_part += f"Results:\n{node_analysis}\n"
                 if n.metric and n.metric.value is not None:
                     metric_display = self._format_metric_change(n)
                     summary_part += f"Validation Metric: {metric_display}\n"
@@ -333,7 +364,7 @@ class SearchNode(DataClassJsonMixin):
             summary_part = f"Design: {self.parent.plan}\n"
             if include_code:
                 summary_part += f"Code: {self.parent.code}\n"
-            summary_part += f"Results: {self.parent.analysis}\n"
+            summary_part += f"Results:\n{self.parent.analysis_for_prompt}\n"
             summary_part += f"Validation Metric: {self.parent.metric.value}\n"
             if hasattr(self.parent, 'exec_time') and self.parent.exec_time is not None:
                 summary_part += f"Execution Time: {self.parent.exec_time:.2f}s\n"
@@ -375,11 +406,13 @@ class SearchNode(DataClassJsonMixin):
 
         if self.is_buggy is True:
             summary_part += f"Results: The implementation of this design has bugs.\n"
-            if self.analysis:
-                summary_part += f"Analysis: {self.analysis}\n"
+            node_analysis = self.analysis_for_prompt
+            if node_analysis and node_analysis != "N/A":
+                summary_part += f"Analysis:\n{node_analysis}\n"
         elif self.is_buggy is False:
-            if self.analysis:
-                summary_part += f"Results: {self.analysis}\n"
+            node_analysis = self.analysis_for_prompt
+            if node_analysis and node_analysis != "N/A":
+                summary_part += f"Results:\n{node_analysis}\n"
             if self.metric and self.metric.value is not None:
                 metric_display = self._format_metric_change(self)
                 summary_part += f"Validation Metric: {metric_display}\n"
