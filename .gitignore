@@ -1,85 +1,85 @@
-# ===== Python =====
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg-info/
-*.egg
-.installed.cfg
-MANIFEST
-build/
-dist/
-develop-eggs/
-eggs/
-.eggs/
-wheels/
-sdist/
-
-# ===== Environments =====
-.env
-.venv
-env/
-venv/
-
-# ===== IDE / Editor =====
-.vscode/
+# Operating system and editors
+.DS_Store
+Thumbs.db
+Desktop.ini
 .idea/
+.vscode/
 *.swp
 *.swo
 *~
 
-# ===== Testing & Coverage =====
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-.pytest_cache/
-.hypothesis/
-coverage.xml
-nosetests.xml
-*.cover
-*.py,cover
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
 
-# ===== Type Checking =====
+# Python bytecode, environments, and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Python tooling and test output
+.pytest_cache/
 .mypy_cache/
-.dmypy.json
-dmypy.json
+.ruff_cache/
 .pytype/
 .pyre/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
 
-# ===== Jupyter =====
+# Jupyter
 .ipynb_checkpoints/
 
-# ===== Model Weights & Artifacts =====
-*.pth
-*.pt
-*.pkl
-*.bin
+# Generated model and solver artifacts
 checkpoints/
+artifacts/
+models/
+*.pt
+*.pth
+*.pkl
+*.pickle
+*.joblib
+*.onnx
 
-# ===== Logs =====
+# Logs and process state
 *.log
-logs/
 *.pid
 *.out
+*.tmp
+*.bak
+logs/
 
-# ===== Project Specific =====
+# MLEvolve runtime and external datasets/services
 cache/
-scripts/
 workspace/
 workspaces/
 test_workspace/
 runs/
+outputs/
 dataset/
 mle-bench/
 grading_servers/
-test/
-test.py
 run_scripts/*.json
 eval/grade/*/private/*
-evaluate/
 grading_server.output
+
+# Generated local analysis documents
 CODE_ANALYSIS_REPORT.md
 PROMPT_COMPARISON_REPORT.md
