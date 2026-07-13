@@ -394,7 +394,9 @@ def determine_metric_direction(agent) -> None:
     """
     user_prompt = task_section(agent.task_desc)
 
-    max_retries = 3
+    retry_cfg = getattr(agent.acfg, "retries", None)
+    max_retries = max(1, int(getattr(retry_cfg, "metric_direction_max_attempts", 3)))
+    retry_delay = max(0.0, float(getattr(retry_cfg, "metric_direction_delay_seconds", 1.0)))
     for attempt in range(1, max_retries + 1):
         try:
             if attempt == 1:
@@ -433,7 +435,7 @@ def determine_metric_direction(agent) -> None:
             logger.warning(f"Attempt {attempt}/{max_retries} failed: {e}")
             if attempt < max_retries:
                 logger.info("Retrying in a moment...")
-                time.sleep(1)
+                time.sleep(retry_delay)
             else:
                 logger.error("=" * 80)
                 logger.error(f"All {max_retries} attempts failed. Last error: {e}")
@@ -529,7 +531,6 @@ def _build_introduction(agent) -> str:
         )
     intro += "\nDo NOT omit any field."
     return intro
-    
 
 
 def _check_submission_file(agent, node: SearchNode) -> bool:
@@ -924,7 +925,8 @@ def _try_deterministic_parse(agent, node: SearchNode) -> SearchNode | None:
 
 
 def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
-    max_retries = 3
+    retry_cfg = getattr(agent.acfg, "retries", None)
+    max_retries = max(1, int(getattr(retry_cfg, "result_parse_max_attempts", 3)))
     for retry_idx in range(max_retries):
         try:
             logger.info(f"Agent is parsing execution results for node {node.id}")

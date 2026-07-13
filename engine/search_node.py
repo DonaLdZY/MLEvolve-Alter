@@ -149,17 +149,17 @@ class SearchNode(DataClassJsonMixin):
 
     # ---- search methods ----
 
-    
+
     def update_beta(self, success: bool):
-        if success: 
+        if success:
             self.alpha += 1
         else:
             self.beta += 1
-            
+
     def p_mean(self):
         return self.alpha / (self.alpha + self.beta)
-    
-    
+
+
     def uct_value(self, exploration_constant: float = 1.414) -> float:
         """
         Calculate the UCT (Upper Confidence Bound for Trees) value of the current node.
@@ -207,12 +207,12 @@ class SearchNode(DataClassJsonMixin):
                         regular_expected += (self.expected_child_count - len(self.children))
                         return regular_expected >= scfg.num_improves
 
-    
+
     def update(self, result, add=True):
         if add:
             self.visits += 1
             self.total_reward += result
-        
+
     def has_no_bug_child(self):
         for child in self.children:
             if not child.is_buggy:
@@ -370,13 +370,13 @@ class SearchNode(DataClassJsonMixin):
                 summary_part += f"Execution Time: {self.parent.exec_time:.2f}s\n"
             summary.append(summary_part)
         return "\n-------------------------------\n".join(summary)
-    
+
     def add_expected_child_count(self):
         with self.child_count_lock:
             self.expected_child_count += 1
             logger.info(f"current {self.id} expected_child_count is {self.expected_child_count}.")
-            
-            
+
+
     def sub_expected_child_count(self):
         with self.child_count_lock:
             self.expected_child_count -= 1
@@ -384,13 +384,13 @@ class SearchNode(DataClassJsonMixin):
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state.pop('child_count_lock', None) 
+        state.pop('child_count_lock', None)
         return state
-    
+
     def __setstate__(self, state):
         self.__dict__.update(state)
         self.child_count_lock = threading.Lock()
-    
+
     def generate_node_trajectory(self, need_code=False) -> str:
         """Return formatted trajectory string for this node."""
         summary_part = f""
@@ -422,14 +422,14 @@ class SearchNode(DataClassJsonMixin):
         else:
             summary_part += f"Results: Step not yet executed.\n"
             logger.warning(f"Node {self.id} is not executed.")
-        
+
         return summary_part
-    
+
     def get_root_to_current_trajectory(self, max_steps: int = None, llm_summary_threshold: int = 5) -> str:
         """Return formatted trajectory from root to this node (optionally limited to max_steps)."""
         trajectory = self._get_trajectory_raw(max_steps)
         return self._get_trajectory_full(trajectory)
-    
+
     def _get_trajectory_raw(self, max_steps: int = None) -> List[str]:
         """Collect raw trajectory steps from this node up to root."""
         trajectory = []
@@ -441,19 +441,19 @@ class SearchNode(DataClassJsonMixin):
             if max_steps and len(trajectory) >= max_steps:
                 break
         return list(reversed(trajectory))
-    
+
     def _get_trajectory_full(self, trajectory: List[str]) -> str:
         """Format trajectory as Step 1: ..., Step 2: ..."""
         trajectory_parts = []
-        
+
         for i, step_trajectory in enumerate(trajectory):
             step_header = f"Step {i+1}:"
             step_info = f"{step_header}\n{step_trajectory}"
             trajectory_parts.append(step_info)
-        
+
         return "\n-------------------------------\n".join(trajectory_parts)
-    
-    
+
+
 # ---------------------------------------------------------------------------
 # Journal — ordered collection of SearchNodes forming the solution tree
 # ---------------------------------------------------------------------------
@@ -539,4 +539,3 @@ def filter_journal(journal: Journal) -> Journal:
         return filter_for_best_path(journal, best_node.id)
     else:
         return filter_for_longest_path(journal)
-

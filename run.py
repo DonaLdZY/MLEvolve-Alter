@@ -11,6 +11,46 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from types import SimpleNamespace
 from typing import Optional
 
+
+def _print_cli_help() -> None:
+    print(
+        """usage: python run.py [key=value ...]
+
+Run the MLEvolve search engine with OmegaConf dotted-key overrides.
+
+Required configuration:
+  data_dir=PATH                  Source data or AutoRealize output directory
+  desc_file=PATH                 Task description markdown
+    or goal=TEXT                 Inline task goal when desc_file is omitted
+
+Common overrides:
+  exp_id=ID                      External experiment identifier
+  exp_name=NAME                  Human-readable run name
+  log_dir=PATH                   Log output root
+  workspace_dir=PATH             Execution workspace root
+  agent.steps=50                 Maximum search nodes/steps
+  agent.time_limit=10800         Search wall-clock limit in seconds
+  agent.initial_drafts=1         Number of initial drafts
+  agent.search.parallel_search_num=4
+  runtime.resume_run=true        Resume from existing log/workspace paths
+
+Configuration precedence:
+  config/config.yaml < MLEVOLVE_CONFIG_PATH file < key=value overrides
+
+Examples:
+  python run.py data_dir=./input desc_file=./description.md exp_name=demo
+  python run.py runtime.resume_run=true log_dir=./existing/logs workspace_dir=./existing/workspace data_dir=./input desc_file=./description.md
+
+The complete documented configuration is config/config.yaml.
+"""
+    )
+
+
+if __name__ == "__main__" and any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+    _print_cli_help()
+    raise SystemExit(0)
+
+
 import torch
 from omegaconf import OmegaConf
 from rich.status import Status
@@ -28,6 +68,7 @@ from utils.serialize import load_json
 
 
 PENDING_NODES_FILE = "pending_nodes.json"
+RUN_STATUS_FILE = "run_status.json"
 PENDING_DRAFT_STATUSES = {"generating", "pending_execution", "executing", "cancelled", "failed"}
 
 
@@ -77,8 +118,8 @@ def _pending_node_row(node, status: str) -> dict:
     }
 
 
-def _make_pending_draft_placeholder(draft_idx: int, draft_total: int, *, fast_first: bool) -> SimpleNamespace:
-    mode = "fast_first_draft" if fast_first else "stepwise_draft"
+def _make_pending_draft_placeholder(draft_idx: int, draft_total: int, *, single_call: bool) -> SimpleNamespace:
+    mode = "single_call_draft" if single_call else "stepwise_draft"
     return SimpleNamespace(
         id=f"draft-{draft_idx + 1}-generating",
         parent=None,
@@ -107,8 +148,42 @@ def _make_pending_draft_placeholder(draft_idx: int, draft_total: int, *, fast_fi
     )
 
 
-def _write_pending_nodes_state(log_dir, nodes, status_by_id: dict[str, str], phase: str) -> None:
-    path = log_dir / PENDING_NODES_FILE
+def _write_run_status(
+    cfg,
+    *,
+    status: str,
+    termination_reason: str,
+    completed_steps: int,
+    total_steps: int,
+    time_limit_secs: int,
+) -> None:
+    payload = {
+        "schema_version": "mlevolve.run_status.v1",
+        "status": status,
+        "termination_reason": termination_reason,
+        "completed_steps": completed_steps,
+        "total_steps": total_steps,
+        "time_limit_secs": time_limit_secs,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    runtime_cfg = getattr(cfg, "runtime", None)
+    filename = str(getattr(runtime_cfg, "run_status_filename", RUN_STATUS_FILE) or RUN_STATUS_FILE)
+    path = cfg.log_dir / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _write_pending_nodes_state(cfg, nodes, status_by_id: dict[str, str], phase: str) -> None:
+    runtime_cfg = getattr(cfg, "runtime", None)
+    draft_cfg = getattr(getattr(cfg, "agent", None), "draft", None)
+    if not bool(getattr(runtime_cfg, "write_pending_nodes", True)) or not bool(
+        getattr(draft_cfg, "show_pending_draft_nodes", True)
+    ):
+        return
+    filename = str(getattr(runtime_cfg, "pending_nodes_filename", PENDING_NODES_FILE) or PENDING_NODES_FILE)
+    path = cfg.log_dir / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for node in nodes:
@@ -125,13 +200,15 @@ def _write_pending_nodes_state(log_dir, nodes, status_by_id: dict[str, str], pha
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     last_error: Exception | None = None
-    for attempt in range(5):
+    max_attempts = max(1, int(getattr(runtime_cfg, "state_write_max_attempts", 5)))
+    retry_delay = max(0.0, float(getattr(runtime_cfg, "state_write_retry_delay_seconds", 0.05)))
+    for attempt in range(max_attempts):
         try:
             tmp_path.replace(path)
             return
         except PermissionError as exc:
             last_error = exc
-            time.sleep(0.05 * (attempt + 1))
+            time.sleep(retry_delay * (attempt + 1))
     try:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         tmp_path.unlink(missing_ok=True)
@@ -144,7 +221,11 @@ def _write_pending_nodes_state(log_dir, nodes, status_by_id: dict[str, str], pha
 
 def run():
     cfg = load_cfg()
-    resume_run = os.environ.get("MLEVOLVE_RESUME_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+    runtime_cfg = getattr(cfg, "runtime", None)
+    env_resume = os.environ.get("MLEVOLVE_RESUME_RUN", "").strip().lower()
+    resume_run = bool(getattr(runtime_cfg, "resume_run", False))
+    if env_resume:
+        resume_run = env_resume in {"1", "true", "yes", "on"}
     if cfg.torch_hub_dir:
         torch.hub.set_dir(cfg.torch_hub_dir)
     set_global_seed(cfg.agent.seed)
@@ -164,7 +245,11 @@ def run():
     global_step = 0
 
     def cleanup():
-        if global_step == 0 and not resume_run:
+        if (
+            global_step == 0
+            and not resume_run
+            and bool(getattr(runtime_cfg, "cleanup_empty_workspace_on_exit", True))
+        ):
             shutil.rmtree(cfg.workspace_dir)
 
     atexit.register(cleanup)
@@ -230,17 +315,20 @@ def run():
     max_workers = interpreter.max_parallel_run
     total_steps = cfg.agent.steps
     initial_draft_count = cfg.agent.initial_drafts
+    draft_cfg = getattr(cfg.agent, "draft", None)
     optimization_or_rl_task = is_optimization_or_rl_task(
         task_desc=str(getattr(agent, "task_desc", "") or task_desc or ""),
         coldstart_description=str(getattr(agent, "coldstart_description", "") or ""),
     )
-    if optimization_or_rl_task and initial_draft_count > 1:
+    optimization_draft_cap = int(getattr(draft_cfg, "optimization_initial_drafts_cap", 1))
+    if optimization_or_rl_task and optimization_draft_cap > 0 and initial_draft_count > optimization_draft_cap:
         logger.info(
-            "Optimization/RL task detected; reducing Phase 1 initial_drafts from %s to 1 "
+            "Optimization/RL task detected; reducing Phase 1 initial_drafts from %s to %s "
             "so the first executable search node appears sooner.",
             initial_draft_count,
+            optimization_draft_cap,
         )
-        initial_draft_count = 1
+        initial_draft_count = optimization_draft_cap
 
     time_limit_secs = int(getattr(cfg.agent, "time_limit", 0) or 0)
     run_deadline: Optional[float] = time.time() + time_limit_secs if time_limit_secs > 0 else None
@@ -248,7 +336,11 @@ def run():
 
     logger.info(f"ThreadPool max_workers set to: {max_workers} (matching interpreter capacity)")
     logger.info(f"Initial draft count: {initial_draft_count} (executed sequentially for diversity)")
-    logger.info("Phase 1 fast_first_draft is enabled: draft 1 uses single-call generation before stepwise drafts.")
+    logger.info(
+        "Phase 1 draft mode: fast_first=%s, stepwise_after_first=%s",
+        bool(getattr(draft_cfg, "fast_first_draft", True)),
+        bool(getattr(draft_cfg, "use_stepwise_after_first", True)),
+    )
     if run_deadline is not None:
         logger.info(f"Hard timeout enabled: {time_limit_secs}s")
 
@@ -260,24 +352,24 @@ def run():
 
     pending_draft_nodes = []
     pending_status_by_id: dict[str, str] = {}
-    _write_pending_nodes_state(cfg.log_dir, pending_draft_nodes, pending_status_by_id, "initialized")
+    _write_pending_nodes_state(cfg, pending_draft_nodes, pending_status_by_id, "initialized")
 
     def refresh_pending_nodes_state(phase: str) -> None:
         try:
-            _write_pending_nodes_state(cfg.log_dir, pending_draft_nodes, pending_status_by_id, phase)
+            _write_pending_nodes_state(cfg, pending_draft_nodes, pending_status_by_id, phase)
         except Exception as exc:
             logger.warning(f"Failed to write {PENDING_NODES_FILE}: {exc}")
 
     if initial_draft_count > 0 and completed == 0 and total_steps > 0:
         logger.info(f"Phase 1: Sequential draft generation (code only, {initial_draft_count} drafts)")
 
-        def step_task_generate_only(*, fast_first_draft: bool = False):
+        def step_task_generate_only(*, single_call: bool = False):
             logger.info(
                 "[step_task_generate_only] Generating draft from virtual root%s",
-                " using fast_first_draft single-call route" if fast_first_draft else "",
+                " using single-call route" if single_call else "",
             )
             previous_stepwise = getattr(agent, "use_stepwise_generation", True)
-            if fast_first_draft:
+            if single_call:
                 agent.use_stepwise_generation = False
             try:
                 return agent.step(exec_callback=exec_callback, node=None, execute_immediately=False)
@@ -290,11 +382,15 @@ def run():
                 timed_out = True
                 logger.warning("Time limit reached during Phase 1 draft generation; stop creating new drafts.")
                 break
-            fast_first_draft = draft_idx == 0
+            single_call = (
+                draft_idx == 0 and bool(getattr(draft_cfg, "fast_first_draft", True))
+            ) or (
+                draft_idx > 0 and not bool(getattr(draft_cfg, "use_stepwise_after_first", True))
+            )
             placeholder = _make_pending_draft_placeholder(
                 draft_idx,
                 draft_total,
-                fast_first=fast_first_draft,
+                single_call=single_call,
             )
             pending_draft_nodes.append(placeholder)
             pending_status_by_id[placeholder.id] = "generating"
@@ -303,7 +399,7 @@ def run():
                 logger.info(
                     f"Generating draft {draft_idx + 1}/{min(initial_draft_count, total_steps)} (code only)"
                 )
-                cur_node = step_task_generate_only(fast_first_draft=fast_first_draft)
+                cur_node = step_task_generate_only(single_call=single_call)
                 pending_draft_nodes[-1] = cur_node
                 pending_status_by_id.pop(placeholder.id, None)
                 pending_status_by_id[cur_node.id] = "pending_execution"
@@ -355,7 +451,7 @@ def run():
                 submitted_drafts += 1
                 logger.info(f"Submitted draft execution: {node.id}")
                 if i < len(drafts_to_execute) - 1:
-                    time.sleep(10)
+                    time.sleep(max(0.0, float(getattr(draft_cfg, "submission_stagger_seconds", 10.0))))
                     if is_timed_out():
                         timed_out = True
                         logger.warning("Time limit reached while staggering draft submissions.")
@@ -377,7 +473,11 @@ def run():
                     logger.warning("Time limit reached in Phase 2 main loop.")
                     break
 
-                done, _ = wait(futures, return_when=FIRST_COMPLETED, timeout=1.0)
+                done, _ = wait(
+                    futures,
+                    return_when=FIRST_COMPLETED,
+                    timeout=max(0.05, float(getattr(runtime_cfg, "scheduler_poll_seconds", 1.0))),
+                )
 
                 if not done:
                     continue
@@ -423,9 +523,9 @@ def run():
                     logger.info(f"Progress: {completed}/{total_steps} steps completed, {len(futures)} tasks running")
 
             if timed_out:
-                logger.error(
+                logger.warning(
                     f"Time limit reached (configured={time_limit_secs}s). "
-                    "Stop submitting new tasks and terminate running subprocesses."
+                    "Search budget is exhausted; saving current best artifacts and ending AutoML normally."
                 )
                 interpreter.terminate_all_subprocesses()
                 fast_shutdown = True
@@ -463,13 +563,29 @@ def run():
             f"All steps completed in Phase 1 (total_steps={total_steps} <= initial_draft_count={initial_draft_count})"
         )
 
-    if timed_out:
-        logger.error(f"MLEvolve stopped by hard timeout: {time_limit_secs}s")
+    if timed_out and bool(getattr(runtime_cfg, "force_process_exit_on_timeout", True)):
+        logger.warning(f"MLEvolve search budget exhausted: {time_limit_secs}s")
 
     if not pending_status_by_id:
         refresh_pending_nodes_state("complete")
 
+    termination_reason = "time_limit_exhausted" if timed_out else "steps_completed"
+    _write_run_status(
+        cfg,
+        status="completed",
+        termination_reason=termination_reason,
+        completed_steps=max(0, len(journal) - 1),
+        total_steps=total_steps,
+        time_limit_secs=time_limit_secs,
+    )
     interpreter.cleanup_session(-1)
+    if timed_out:
+        # ThreadPoolExecutor cannot cancel already-running LLM calls. Once the
+        # search budget is exhausted and artifacts are saved, exit the process
+        # immediately so the outer service can continue to AutoReport instead
+        # of waiting for stale worker threads until the grace timeout.
+        logging.shutdown()
+        os._exit(0)
 
 
 if __name__ == "__main__":

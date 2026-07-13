@@ -1,0 +1,7 @@
+# Supported default MLEvolve installation: orchestration plus the general
+# data-science, deep-learning, optimization, and reinforcement-learning stack.
+-r requirements_base.txt
+-r requirements_ml.txt
+
+# Install requirements_domain.txt separately for vision, NLP, forecasting,
+# audio, geospatial, and chemistry tasks.

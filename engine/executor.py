@@ -18,7 +18,38 @@ from multiprocessing import Lock
 from pathlib import Path
 
 import humanize
+import psutil
 from dataclasses_json import DataClassJsonMixin
+
+
+def memory_limited_subprocess_command(
+    command: list[str],
+    *,
+    platform_name: str | None = None,
+    environment: dict[str, str] | None = None,
+    python_executable: str | None = None,
+    guard_path: Path | None = None,
+) -> list[str]:
+    current_platform = platform_name or sys.platform
+    env = environment if environment is not None else os.environ
+    mode = str(env.get("MLEVOLVE_MEMORY_ENFORCEMENT_MODE") or "").strip()
+    try:
+        limit_bytes = max(0, int(env.get("MLEVOLVE_MEMORY_LIMIT_BYTES") or 0))
+    except (TypeError, ValueError):
+        limit_bytes = 0
+    if not (current_platform.startswith("linux") or current_platform == "darwin"):
+        return command
+    if mode != "posix_rlimit_as_plus_child_guard" or limit_bytes <= 0:
+        return command
+    resolved_guard = guard_path or (Path(__file__).resolve().parents[1] / "utils" / "resource_guard.py")
+    return [
+        python_executable or sys.executable,
+        str(resolved_guard),
+        "--memory-bytes",
+        str(limit_bytes),
+        "--",
+        *command,
+    ]
 
 logger = logging.getLogger("MLEvolve")
 
@@ -60,33 +91,41 @@ class Interpreter:
         self.working_dir = Path(working_dir).resolve()
         assert self.working_dir.exists(), f"Working directory {self.working_dir} does not exist"
         self.timeout = timeout
-        self.max_parallel_run = (
+        configured_parallel_run = (
             cfg.agent.search.parallel_search_num if (cfg and getattr(cfg.agent.search, "parallel_search_num", None)) else max_parallel_run
         )
+        worker_cap_raw = str(os.environ.get("MLEVOLVE_CPU_WORKER_CAP") or "").strip()
+        try:
+            worker_cap = max(1, int(worker_cap_raw)) if worker_cap_raw else configured_parallel_run
+        except ValueError:
+            worker_cap = configured_parallel_run
+        self.max_parallel_run = min(configured_parallel_run, worker_cap)
         self.agent_file_name = [f"runfile_{i}.py" for i in range(self.max_parallel_run)]
         self.current_parallel_run = 0
         self.status_map = [0] * self.max_parallel_run
         self.start_cpu_id = int(cfg.start_cpu_id) if cfg else 0
         self.cpu_number = int(cfg.cpu_number) if cfg else 1
-        if self.cpu_number < self.max_parallel_run:
-            raise ValueError(
-                "The maximum level of parallelism exceeds the number of allocated CPU cores; "
-                "ensure that each process has at least one CPU core."
-            )
         self.lock = Lock()
         self._procs_lock = threading.Lock()
         self._active_procs: dict[int, subprocess.Popen] = {}
 
     def _available_cpus(self) -> list[int]:
         """Return the CPU ids available to this process on the current platform."""
-        if hasattr(os, "sched_getaffinity"):
-            return sorted(os.sched_getaffinity(0))
+        process = psutil.Process(os.getpid())
+        cpus: list[int] = []
+        if hasattr(process, "cpu_affinity"):
+            try:
+                cpus = sorted(int(item) for item in process.cpu_affinity())
+            except Exception:
+                cpus = []
+        if not cpus and hasattr(os, "sched_getaffinity"):
+            cpus = sorted(os.sched_getaffinity(0))
+        if not cpus:
+            cpus = list(range(max(1, int(os.cpu_count() or self.cpu_number or 1))))
 
-        total_cpus = os.cpu_count() or self.cpu_number or 1
-        start = max(0, self.start_cpu_id)
-        end = min(total_cpus, start + max(1, self.cpu_number))
-        cpus = list(range(start, end))
-        return cpus or list(range(total_cpus))
+        start_index = cpus.index(self.start_cpu_id) if self.start_cpu_id in cpus else 0
+        selected = cpus[start_index : start_index + max(1, self.cpu_number)]
+        return selected or cpus[: max(1, self.cpu_number)]
 
     def _build_affinity_pre_code(self, cpu_set: set[int]) -> str:
         """Build cross-platform best-effort CPU affinity setup code for the child process."""
@@ -275,12 +314,10 @@ class Interpreter:
         proc = None
         
         try:
-            cpu_number_per_session = max(1, int(self.cpu_number / self.max_parallel_run))
             avail_cpus = self._available_cpus()
-            start = process_id * cpu_number_per_session
-            cpu_set = set(avail_cpus[start:start + cpu_number_per_session])
-            if not cpu_set:
-                cpu_set = set(avail_cpus)
+            cpu_set = set(avail_cpus[process_id::self.max_parallel_run])
+            if not cpu_set and avail_cpus:
+                cpu_set = {avail_cpus[process_id % len(avail_cpus)]}
             pre_code = self._build_affinity_pre_code(cpu_set)
             if pre_code:
                 logger.info(f"Set process_id:{process_id} to prefer cpu: {cpu_set}")
@@ -300,7 +337,7 @@ class Interpreter:
             with open(runfile_path, "w") as f:
                 f.write(code)
 
-            cmd = [sys.executable, str(runfile_path)]
+            cmd = memory_limited_subprocess_command([sys.executable, str(runfile_path)])
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(run_wd),

@@ -26,6 +26,7 @@ from .usage import (
 
 logger = logging.getLogger("MLEvolve")
 NETWORK_RETRY_MAX_ATTEMPTS = 5
+NETWORK_RETRY_BASE_SLEEP_SECONDS = 5.0
 NETWORK_RETRY_MAX_SLEEP_SECONDS = 30.0
 MAX_CONTINUATION_ROUNDS = 2
 CONTINUATION_OVERLAP_SCAN_CHARS = 4096
@@ -48,11 +49,15 @@ def _finish_reason_is_length(finish_reason: str | None) -> bool:
     return str(finish_reason or "").strip().lower() in {"length", "max_tokens", "max_output_tokens"}
 
 
-def _append_with_overlap(base: str, addition: str) -> str:
+def _append_with_overlap(
+    base: str,
+    addition: str,
+    max_scan_chars: int = CONTINUATION_OVERLAP_SCAN_CHARS,
+) -> str:
     """Append continuation text while removing exact repeated overlap at the join."""
     if not base or not addition:
         return f"{base}{addition}"
-    max_scan = min(len(base), len(addition), CONTINUATION_OVERLAP_SCAN_CHARS)
+    max_scan = min(len(base), len(addition), max(0, int(max_scan_chars)))
     for size in range(max_scan, 15, -1):
         if base[-size:] == addition[:size]:
             return base + addition[size:]
@@ -386,9 +391,27 @@ def _is_retryable_error(exc: Exception) -> bool:
     return False
 
 
-def _create_with_retry(client: OpenAI, params: dict[str, Any], *, label: str):
+def _create_with_retry(
+    client: OpenAI,
+    params: dict[str, Any],
+    *,
+    label: str,
+    stage=None,
+):
+    max_attempts = max(
+        1,
+        int(getattr(stage, "network_retry_max_attempts", NETWORK_RETRY_MAX_ATTEMPTS)),
+    )
+    base_sleep = max(
+        0.0,
+        float(getattr(stage, "network_retry_base_sleep_seconds", NETWORK_RETRY_BASE_SLEEP_SECONDS)),
+    )
+    max_sleep = max(
+        0.0,
+        float(getattr(stage, "network_retry_max_sleep_seconds", NETWORK_RETRY_MAX_SLEEP_SECONDS)),
+    )
     last_exc: Exception | None = None
-    for attempt in range(1, NETWORK_RETRY_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             return client.chat.completions.create(**params)
         except Exception as exc:
@@ -398,31 +421,37 @@ def _create_with_retry(client: OpenAI, params: dict[str, Any], *, label: str):
                 "%s call failed (attempt %s/%s, retryable=%s): %s",
                 label,
                 attempt,
-                NETWORK_RETRY_MAX_ATTEMPTS,
+                max_attempts,
                 retryable,
                 exc,
             )
-            if (not retryable) or attempt >= NETWORK_RETRY_MAX_ATTEMPTS:
+            if (not retryable) or attempt >= max_attempts:
                 raise
-            sleep_secs = min(NETWORK_RETRY_MAX_SLEEP_SECONDS, 5.0 * attempt)
+            sleep_secs = min(max_sleep, base_sleep * attempt)
             logger.warning(
                 "%s network error; reconnecting after %.1fs (attempt %s/%s)",
                 label,
                 sleep_secs,
                 attempt,
-                NETWORK_RETRY_MAX_ATTEMPTS,
+                max_attempts,
             )
             time.sleep(sleep_secs)
     if last_exc is not None:
         raise last_exc
 
 
-def _stream_create_with_usage_fallback(client: OpenAI, params: dict[str, Any], *, label: str):
+def _stream_create_with_usage_fallback(
+    client: OpenAI,
+    params: dict[str, Any],
+    *,
+    label: str,
+    stage=None,
+):
     """Request streaming usage when supported; retry safely without it otherwise."""
     stream_params = dict(params)
     stream_params.setdefault("stream_options", {"include_usage": True})
     try:
-        return _create_with_retry(client, stream_params, label=label)
+        return _create_with_retry(client, stream_params, label=label, stage=stage)
     except Exception as exc:
         msg = str(exc).lower()
         unsupported = any(
@@ -439,13 +468,29 @@ def _stream_create_with_usage_fallback(client: OpenAI, params: dict[str, Any], *
         if not unsupported:
             raise
         logger.warning("%s provider rejected stream_options.include_usage; retrying stream without usage metadata", label)
-        return _create_with_retry(client, params, label=f"{label}_without_usage")
+        return _create_with_retry(
+            client,
+            params,
+            label=f"{label}_without_usage",
+            stage=stage,
+        )
 
 
-def _collect_stream_response(client: OpenAI, params: dict[str, Any], *, label: str) -> tuple[str, str, Any, float]:
+def _collect_stream_response(
+    client: OpenAI,
+    params: dict[str, Any],
+    *,
+    label: str,
+    stage=None,
+) -> tuple[str, str, Any, float]:
     """Run one streaming request and return raw text, finish reason, usage, and elapsed seconds."""
     t0 = time.time()
-    stream = _stream_create_with_usage_fallback(client, params, label=label)
+    stream = _stream_create_with_usage_fallback(
+        client,
+        params,
+        label=label,
+        stage=stage,
+    )
     full_text = ""
     final_usage: Any = None
     final_finish_reason = ""
@@ -514,7 +559,7 @@ def query(
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,
-        timeout=1200.0,
+        timeout=max(1.0, float(getattr(stage, "request_timeout_seconds", 1200.0))),
     )
     messages = _build_messages(system_message, user_message)
     if not messages:
@@ -574,7 +619,7 @@ def query(
         )
     logger.info(f"Querying OpenAI-compatible API with model: {model}")
     try:
-        completion = _create_with_retry(client, params, label="query")
+        completion = _create_with_retry(client, params, label="query", stage=stage)
     except Exception as e:
         logger.error(f"Error calling OpenAI-compatible API: {e}")
         raise
@@ -662,7 +707,12 @@ def query(
                 json_params["extra_body"] = extra_body
 
             fallback_t0 = time.time()
-            completion = _create_with_retry(client, json_params, label="query_json_fallback")
+            completion = _create_with_retry(
+                client,
+                json_params,
+                label="query_json_fallback",
+                stage=stage,
+            )
             fallback_seconds = time.time() - fallback_t0
             message = completion.choices[0].message
             if not message.content:
@@ -747,8 +797,8 @@ def generate(
     max_tokens: int | None = None,
     stop_tokens: list[str] | None = None,
     json_schema: dict | None = None,
-    max_retries: int = 5,
-    retry_delay: float = 3,
+    max_retries: int | None = None,
+    retry_delay: float | None = None,
 ) -> str:
     """Streaming text generation via OpenAI-compatible Chat API. Supports chat format {system, user, assistant} for Qwen."""
     stage = cfg.agent.code
@@ -757,7 +807,57 @@ def generate(
     client = OpenAI(
         api_key=stage.api_key,
         base_url=stage.base_url or None,
-        timeout=1200.0,
+        timeout=max(1.0, float(getattr(stage, "request_timeout_seconds", 1200.0))),
+    )
+    max_retries = max(
+        1,
+        int(
+            max_retries
+            if max_retries is not None
+            else getattr(stage, "generation_max_retries", 5)
+        ),
+    )
+    retry_delay = max(
+        0.0,
+        float(
+            retry_delay
+            if retry_delay is not None
+            else getattr(stage, "generation_retry_delay_seconds", 3.0)
+        ),
+    )
+    max_continuation_rounds = max(
+        0,
+        int(getattr(stage, "continuation_max_rounds", MAX_CONTINUATION_ROUNDS)),
+    )
+    continuation_overlap_scan_chars = max(
+        0,
+        int(
+            getattr(
+                stage,
+                "continuation_overlap_scan_chars",
+                CONTINUATION_OVERLAP_SCAN_CHARS,
+            )
+        ),
+    )
+    network_retry_base_sleep = max(
+        0.0,
+        float(
+            getattr(
+                stage,
+                "network_retry_base_sleep_seconds",
+                NETWORK_RETRY_BASE_SLEEP_SECONDS,
+            )
+        ),
+    )
+    network_retry_max_sleep = max(
+        0.0,
+        float(
+            getattr(
+                stage,
+                "network_retry_max_sleep_seconds",
+                NETWORK_RETRY_MAX_SLEEP_SECONDS,
+            )
+        ),
     )
     # Qwen: thinking + json_schema are mutually exclusive — drop schema, keep thinking.
     if json_schema is not None and thinking_json_incompatible(model):
@@ -809,7 +909,10 @@ def generate(
     for attempt in range(max_retries):
         try:
             raw_full_text, final_finish_reason, final_usage, elapsed = _collect_stream_response(
-                client, params, label="generate_stream"
+                client,
+                params,
+                label="generate_stream",
+                stage=stage,
             )
             full_text = _strip_visible_thinking(raw_full_text)
             logger.info(f"generate response: {full_text}", extra={"verbose": True})
@@ -847,13 +950,17 @@ def generate(
 
             allow_continuation = json_schema is None
             continuation_round = 0
-            while allow_continuation and _finish_reason_is_length(final_finish_reason) and continuation_round < MAX_CONTINUATION_ROUNDS:
+            while (
+                allow_continuation
+                and _finish_reason_is_length(final_finish_reason)
+                and continuation_round < max_continuation_rounds
+            ):
                 continuation_round += 1
                 logger.warning(
                     "generate response truncated by max_tokens (%s); requesting continuation round %s/%s",
                     params.get("max_tokens"),
                     continuation_round,
-                    MAX_CONTINUATION_ROUNDS,
+                    max_continuation_rounds,
                 )
                 continuation_messages = _build_continuation_messages(
                     messages,
@@ -867,8 +974,13 @@ def generate(
                     client,
                     continuation_params,
                     label=f"generate_stream_continuation_{continuation_round}",
+                    stage=stage,
                 )
-                raw_full_text = _append_with_overlap(raw_full_text, continuation_text)
+                raw_full_text = _append_with_overlap(
+                    raw_full_text,
+                    continuation_text,
+                    max_scan_chars=continuation_overlap_scan_chars,
+                )
                 full_text = _strip_visible_thinking(raw_full_text)
                 log_llm_usage(
                     cfg=cfg,
@@ -903,5 +1015,10 @@ def generate(
                 raise
             if not retryable:
                 raise
-            time.sleep(min(NETWORK_RETRY_MAX_SLEEP_SECONDS, max(float(retry_delay), 5.0 * (attempt + 1))))
+            time.sleep(
+                min(
+                    network_retry_max_sleep,
+                    max(float(retry_delay), network_retry_base_sleep * (attempt + 1)),
+                )
+            )
     return ""

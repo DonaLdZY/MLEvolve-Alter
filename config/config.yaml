@@ -1,158 +1,362 @@
-# ============================================================
-#  Data & paths
-# ============================================================
+# MLEvolve 正式默认配置。
+# 默认读取本文件，也可通过 MLEVOLVE_CONFIG_PATH 指定其他 YAML，并支持 CLI 点号覆盖，例如：
+# python run.py data_dir=./input desc_file=./description.md agent.steps=50
+
+# Source data directory; required / 原始数据目录；必填
 data_dir: null
-dataset_dir: null  # optional unless use_grading_server=True; path to mle-bench dataset root, e.g. /data/mle-bench
+# Optional benchmark dataset root / 可选评测数据集根目录
+dataset_dir: null
+# Task description markdown; preferred over goal/eval / 任务说明文件；优先于 goal/eval
 desc_file: null
+# Inline task goal when desc_file is absent / 无 desc_file 时的内联任务目标
 goal: null
+# Inline evaluation description / 内联评估说明
 eval: null
+# Human experiment name; timestamp is added automatically / 实验名；默认自动添加时间戳
 exp_name: null
+# Optional external experiment identifier / 可选外部实验编号
 exp_id: ""
 
+# Run logs root / 运行日志根目录
 log_dir: ./runs
+# DEBUG|INFO|WARNING|ERROR / 根日志级别
 log_level: INFO
+# Execution workspace root / 执行工作区根目录
 workspace_dir: ./runs
-preprocess_data: True
-copy_data: False
+# Normalize/extract input files before search / 搜索前是否预处理输入文件
+preprocess_data: true
+# true=physical copy, false=prefer links when supported / true=复制数据，false=尽量使用链接
+copy_data: false
 
-# Resource
+# First CPU index available to generated programs / 可供生成程序使用的起始 CPU 编号
 start_cpu_id: 0
-cpu_number: 21
+# Total CPUs available to this task / 本任务可使用的 CPU 数量
+cpu_number: 4
 
-# Model paths
-torch_hub_dir: ""       # path to torch hub cache, e.g. /data/pretrain_models/torch_models
-pretrain_model_dir: ""  # path to pretrained model weights, e.g. /data/pretrain_models
+# Per-task resource limits / 每个任务的资源限制
+resources:
+  # Total logical CPU cores visible to the whole task process tree / 整个任务进程树可使用的逻辑 CPU 核心总数
+  cpu_cores: 4
+  # Total process-tree memory quota in GiB; node allocation fails at the limit, 0 disables it / 任务进程树总内存配额（GiB）；超额节点申请失败，0 表示不限制
+  memory_limit_gb: 8.0
+  # all|selected|none / 全部设备可见、仅所选设备可见、全部设备隐藏
+  accelerator_mode: "all"
+  # Stable ids returned by GET /resources/inventory, for example cuda:0 / 设备探测接口返回的稳定设备编号
+  accelerator_device_ids: []
+  # CPU/memory process-tree sampling interval seconds / 进程树 CPU 与内存监测间隔秒数
+  monitor_interval_seconds: 0.5
 
-# ============================================================
-#  Code execution
-# ============================================================
+# Optional Torch Hub cache / 可选 Torch Hub 缓存目录
+torch_hub_dir: ""
+# Optional pretrained-weight directory / 可选预训练权重目录
+pretrain_model_dir: ""
+
+# Generated-code execution / 生成代码执行
 exec:
+  # Per-node code execution timeout seconds / 单节点代码执行超时秒数
   timeout: 32400
-  agent_file_name: runfile.py
+  # Base generated-script filename / 生成脚本基础文件名
+  agent_file_name: "runfile.py"
 
-# ============================================================
-#  Agent config
-# ============================================================
+# Agent models, drafts, memory, and search / Agent 模型、草稿、记忆与搜索
 agent:
-
-  # --- Basic run params ---
-  steps: 500
-  time_limit: 43200          # 12h
+  # Maximum search nodes/steps / 最大搜索节点或步数
+  steps: 50
+  # Whole-search wall-clock limit seconds / 整体搜索时限秒数
+  time_limit: 10800
+  # Initial draft count before normal search / 正常搜索前的初始草稿数
   initial_drafts: 3
+  # Random seed / 随机种子
   seed: 42
-  data_preview: True
-  generate_submission: True
+  # Generate deterministic input preview / 是否生成确定性数据预览
+  data_preview: true
+  # Produce final submission when task requires it / 是否生成最终 submission
+  generate_submission: true
 
-  # --- LLM models ---
+  # Coding/generation model / 编码与生成模型
   code:
-    model: deepseek-v4-pro
-    temp: 1
-    base_url: "https://api.deepseek.com/beta"   # Gemini API endpoint
-    api_key: "sk-170ca9aab9684a41bf9c93a0c3f95f26"    # Gemini API key
-    enable_thinking: null   # null=provider default, true=force enable, false=force disable when backend supports it
-    reasoning_effort: null  # null=provider default; allowed: low|medium|high|xhigh (DeepSeek maps low/medium->high, xhigh->max)
-    max_tokens: null        # null/0=do not pass max_tokens; provider/API default decides output cap
+    # Coding model / 编码模型
+    model: "deepseek-v4-pro"
+    # Coding-model temperature / 编码模型温度
+    temp: 1.0
+    # OpenAI-compatible endpoint / OpenAI 兼容地址
+    base_url: "https://api.deepseek.com/beta"
+    # Non-empty config wins; empty reads MLEVOLVE_CODE_API_KEY or DEEPSEEK_API_KEY / 配置非空优先；留空读取环境变量
+    api_key: ""
+    # null=provider default / null=服务商默认思考模式
+    enable_thinking: null
+    # null|low|medium|high|xhigh|max / 思考强度
+    reasoning_effort: null
+    # null/0 lets provider choose / null/0 由服务商决定输出上限
+    max_tokens: null
+    # Per-request HTTP timeout seconds / 单次 HTTP 请求超时秒数
+    request_timeout_seconds: 1200.0
+    # Retryable network-call attempts / 可重试网络错误的最大尝试次数
+    network_retry_max_attempts: 5
+    # Linear network-retry base delay / 网络重试基础等待秒数
+    network_retry_base_sleep_seconds: 5.0
+    # Maximum network-retry sleep / 网络重试最大等待秒数
+    network_retry_max_sleep_seconds: 30.0
+    # Full generation attempts after retryable failures / 生成调用最大尝试次数
+    generation_max_retries: 5
+    # Minimum delay between generation retries / 生成重试最小等待秒数
+    generation_retry_delay_seconds: 3.0
+    # Automatic continuation calls after token truncation / 输出截断后的最大续写轮数
+    continuation_max_rounds: 2
+    # Character window used to remove repeated continuation overlap / 续写去重扫描字符窗口
+    continuation_overlap_scan_chars: 4096
+
+  # Feedback/review model / 反馈与评审模型
   feedback:
-    model: deepseek-v4-pro
-    temp: 1
-    base_url: "https://api.deepseek.com/beta"   # Gemini API endpoint
-    api_key: "sk-170ca9aab9684a41bf9c93a0c3f95f26"    # Gemini API key
-    enable_thinking: null   # null=provider default, true=force enable, false=force disable when backend supports it
-    reasoning_effort: null  # null=provider default; allowed: low|medium|high|xhigh (DeepSeek maps low/medium->high, xhigh->max)
-    max_tokens: null        # null/0=do not pass max_tokens; provider/API default decides output cap
+    # Review/feedback model / 反馈与评审模型
+    model: "deepseek-v4-pro"
+    # Feedback-model temperature / 反馈模型温度
+    temp: 1.0
+    # OpenAI-compatible endpoint / OpenAI 兼容地址
+    base_url: "https://api.deepseek.com/beta"
+    # Non-empty config wins; empty reads MLEVOLVE_FEEDBACK_API_KEY or DEEPSEEK_API_KEY / 配置非空优先；留空读取环境变量
+    api_key: ""
+    # null=provider default / null=服务商默认思考模式
+    enable_thinking: null
+    # null|low|medium|high|xhigh|max / 思考强度
+    reasoning_effort: null
+    # null/0 lets provider choose / null/0 由服务商决定输出上限
+    max_tokens: null
+    # Per-request HTTP timeout seconds / 单次 HTTP 请求超时秒数
+    request_timeout_seconds: 1200.0
+    # Retryable network-call attempts / 可重试网络错误的最大尝试次数
+    network_retry_max_attempts: 5
+    # Linear network-retry base delay / 网络重试基础等待秒数
+    network_retry_base_sleep_seconds: 5.0
+    # Maximum network-retry sleep / 网络重试最大等待秒数
+    network_retry_max_sleep_seconds: 30.0
+    # Full generation attempts after retryable failures / 生成调用最大尝试次数
+    generation_max_retries: 5
+    # Minimum delay between generation retries / 生成重试最小等待秒数
+    generation_retry_delay_seconds: 3.0
+    # Automatic continuation calls after token truncation / 输出截断后的最大续写轮数
+    continuation_max_rounds: 2
+    # Character window used to remove repeated continuation overlap / 续写去重扫描字符窗口
+    continuation_overlap_scan_chars: 4096
 
-  # --- Submission check ---
-  check_data_leakage: True
+  # Check generated code for data leakage / 是否检查数据泄漏
+  check_data_leakage: true
+  # Generate SEARCH/REPLACE patches instead of full rewrites / 是否使用 diff patch
+  use_diff_mode: true
 
-  # --- Code gen mode ---
-  use_diff_mode: True                # SEARCH/REPLACE patch
+  # Initial draft generation / 初始草稿生成
+  draft:
+    # First draft uses one LLM code call / 第一个草稿是否使用单次快速生成
+    fast_first_draft: true
+    # Later drafts use staged generation / 后续草稿是否使用 stepwise
+    use_stepwise_after_first: true
+    # Cap initial drafts for optimization/RL; 0 disables cap / 优化/RL 初始草稿上限；0 不限制
+    optimization_initial_drafts_cap: 1
+    # Write gray pending draft nodes for frontend / 是否为前端写出灰色生成中节点
+    show_pending_draft_nodes: true
+    # Delay between deferred draft submissions / 草稿执行提交间隔秒数
+    submission_stagger_seconds: 10.0
 
-  # --- Branch strategy ---
+  # Agent-level review and structured-output retries / Agent 评审与结构化输出重试
+  retries:
+    # Code-review attempts / 代码审查最大尝试次数
+    code_review_max_attempts: 3
+    # Delay before repeated code review / 代码审查重试等待秒数
+    code_review_delay_seconds: 5.0
+    # Metric-direction inference attempts / 指标方向判断最大尝试次数
+    metric_direction_max_attempts: 3
+    # Metric-direction retry delay / 指标方向判断重试等待秒数
+    metric_direction_delay_seconds: 1.0
+    # Execution-result parser attempts / 执行结果解析最大尝试次数
+    result_parse_max_attempts: 3
+    # Memory planner structured-output attempts / 记忆规划器结构化输出最大尝试次数
+    refine_plan_max_attempts: 3
+
+  # Probability of fusion instead of branch evolution / 停滞时选择融合而非分支演化的概率
   fusion_vs_evolution_prob: 0.3
+  # Probability of branch-fusion trigger when eligible / 满足条件时触发分支融合的概率
   branch_fusion_trigger_prob: 1.0
+  # Maximum drafts used by one fusion / 单次融合最大草稿数
   max_fusion_drafts: 2
 
-  # --- Global memory ---
-  use_global_memory: True
+  # Enable cross-node memory / 是否启用全局记忆
+  use_global_memory: true
+  # Minimum memory retrieval similarity / 记忆检索最低相似度
   memory_similarity_threshold: 0.7
-  memory_embedding_backend: openai          # local | openai
-  
-  memory_embedding_device: cuda
-  memory_embedding_model_path: "BAAI/bge-base-en-v1.5"  # HuggingFace model name or local path (local backend)
+  # local|openai / 向量模型后端
+  memory_embedding_backend: "openai"
+  # Non-empty config wins; empty reads MLEVOLVE_EMBEDDING_API_KEY or EMBEDDING_API_KEY / 配置非空优先；留空读取环境变量
+  memory_embedding_api_key: ""
+  # Remote embedding endpoint / 远程向量化地址
+  memory_embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  # Remote embedding model / 远程向量化模型
+  memory_embedding_model: "text-embedding-v4"
+  # Device for local embeddings / 本地向量模型设备
+  memory_embedding_device: "cuda"
+  # Hugging Face model or local path / 本地向量模型名称或路径
+  memory_embedding_model_path: "BAAI/bge-base-en-v1.5"
 
-  memory_embedding_api_key: "sk-4d15bcf18df74d76a253d8ea662c5a34"             # for remote embedding APIs
-  memory_embedding_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"            # e.g. https://dashscope.aliyuncs.com/compatible-mode/v1
-  memory_embedding_model: "text-embedding-v4"               # e.g. text-embedding-v4
-
-  # --------------------------------------------------------
-  #  Search tree params
-  # --------------------------------------------------------
+  # Search-tree policy and budgets / 搜索树策略与预算
   search:
-    # Parallel & resources
-    parallel_search_num: 3
+    # Concurrent search/execution slots / 并行搜索与执行数量
+    parallel_search_num: 4
+    # GPUs available to generated solutions / 可用 GPU 数
     num_gpus: 1
 
-    # Node expansion limits
-    num_drafts: 5
+    # Maximum root draft children / 根节点最大草稿数
+    num_drafts: 8
+    # Maximum debug children per buggy node / 单错误节点最大 debug 分支数
     num_bugs: 1
-    num_improves: 3
+    # Maximum improve children per successful node / 单成功节点最大 improve 分支数
+    num_improves: 5
+    # Maximum top-K improvements / Top-K 最大改进次数
     topk_max_improves: 10
 
-    # Debug depth
+    # Maximum consecutive debug depth / 最大连续 debug 深度
     max_debug_depth: 20
+    # Ancestor depth considered during back-debug / 回溯 debug 深度
     back_debug_depth: 3
-    debug_prob: 1
+    # Debug action probability when eligible / 满足条件时 debug 概率
+    debug_prob: 1.0
 
-    # Improvement criteria
+    # Minimum score change counted as improvement / 视为改进的最小指标变化
     metric_improvement_threshold: 0.0001
+    # Failed improve attempts before strategy change / 改进连续失败阈值
     max_improve_failure: 3
 
-    # Stagnation detection
+    # Branch stagnation threshold / 普通分支停滞阈值
     branch_stagnation_threshold: 3
+    # Top-K branch stagnation threshold / Top-K 分支停滞阈值
     topk_stagnation_threshold: 6
+    # Recent attempts used for stagnation / 停滞检测窗口
     stagnation_window: 4
+    # Candidate pool retained for ranking / 候选池大小
     top_candidates_size: 20
 
-    # Explore-exploit soft switch
+    # Progress ratio entering mixed exploration / 开始切换探索策略的进度比例
     explore_switch_start: 0.5
+    # Progress ratio entering exploitation-heavy mode / 进入偏利用模式的进度比例
     explore_switch_end: 0.7
+    # Minimum exploration weight / 最低探索权重
     min_exploration_weight: 0.2
 
-    # Top-K node selection
+    # Early-stage top-K count / 前期 Top-K 数量
     topk_early_k: 5
+    # Early per-branch Top-K cap / 前期每分支 Top-K 上限
     topk_early_max_per_branch: 3
+    # Late-stage top-K count / 后期 Top-K 数量
     topk_late_k: 3
+    # Late per-branch Top-K cap / 后期每分支 Top-K 上限
     topk_late_max_per_branch: 2
 
-    # Force backprop
+    # Late progress threshold for forced backprop / 后期强制回传进度阈值
     force_backprop_late_threshold: 0.80
+    # Late forced-backprop probability / 后期强制回传概率
     force_backprop_late_prob: 0.5
+    # Mid progress threshold for forced backprop / 中期强制回传阈值
     force_backprop_mid_threshold: 0.4
+    # Mid-stage periodic forced-backprop interval / 中期强制回传周期
     force_backprop_mid_modulo: 3
+    # Recent best-node comparison window / 最近最优节点窗口
     recent_best_window: 4
 
-    # Multi-branch fusion conditions
+    # Earliest fusion time in hours / 最早融合小时数
     fusion_min_time_hours: 6
+    # Latest fusion time in hours / 最晚融合小时数
     fusion_max_time_hours: 10
+    # Successful nodes required before fusion / 融合所需成功节点数
     fusion_min_successful_nodes: 2
+    # Independent branches required before fusion / 融合所需独立分支数
     fusion_min_branches: 2
 
-  # --------------------------------------------------------
-  #  Exploration constant decay
-  # --------------------------------------------------------
+  # Exploration decay schedule / 探索衰减策略
   decay:
+    # Initial UCT exploration constant / 初始 UCT 探索常数
     exploration_constant: 1.414
+    # Minimum exploration constant / 探索常数下限
     lower_bound: 0.5
+    # Decay rate / 衰减速率
     alpha: 0.01
+    # Search phase boundaries / 搜索阶段边界比例
     phase_ratios: [0.3, 0.7]
 
-# ============================================================
-#  Cold-start knowledge
-# ============================================================
+# Optional cold-start task/model guidance / 可选冷启动任务与模型知识
 coldstart:
-  use_coldstart: True
+  # Enable task/model guidance retrieval / 是否启用冷启动知识
+  use_coldstart: true
+  # Task-tag knowledge file / 任务标签知识文件
   task_json_path: "engine/coldstart/competition_tag_classified.json"
+  # Model guidance knowledge file / 模型指导知识文件
   model_json_path: "engine/coldstart/models_guidance_classified.json"
+  # Runtime-generated guidance; normally leave empty / 运行时生成的指导，通常留空
   description: ""
 
-use_grading_server: False
+# Enable external grading server integration / 是否启用外部 grading server
+use_grading_server: false
+
+# Existing-solution warm start / 已有方案起点
+init_solution:
+  # Start from an existing solution artifact / 是否从已有方案开始
+  use: false
+
+# Resume, lifecycle, snapshots, and saved artifacts / 继续任务、生命周期、快照与产物
+runtime:
+  # Resume an existing run directory / 是否继续已有任务
+  resume_run: false
+  # Explicit timestamp; empty uses current time / 显式运行时间戳；空值使用当前时间
+  run_timestamp: ""
+  # Remove an empty workspace when startup fails / 启动前失败时是否清理空工作区
+  cleanup_empty_workspace_on_exit: true
+  # Exit immediately after timed-out artifacts are saved / 超时保存产物后是否立即退出进程
+  force_process_exit_on_timeout: true
+  # Write pending draft state / 是否写出生成中草稿状态
+  write_pending_nodes: true
+  # Pending-node state filename / 生成中节点状态文件名
+  pending_nodes_filename: "pending_nodes.json"
+  # Final run-status filename / 最终运行状态文件名
+  run_status_filename: "run_status.json"
+  # Atomic state-write attempts / 状态文件原子写重试次数
+  state_write_max_attempts: 5
+  # Base delay between state-write retries / 状态写重试基础间隔秒数
+  state_write_retry_delay_seconds: 0.05
+  # Scheduler completion polling interval / 调度器轮询间隔秒数
+  scheduler_poll_seconds: 1.0
+  # Extra service wait after configured time limit / 搜索时限后的服务等待缓冲秒数
+  graceful_shutdown_buffer_seconds: 600
+  # Graceful termination wait before kill / 强制终止前等待秒数
+  termination_wait_seconds: 20
+  # Maximum full-journal size loaded by frontend snapshot / 前端快照加载完整 journal 的最大字节数
+  snapshot_journal_max_bytes: 157286400
+  # Log events returned per snapshot / 每次快照返回的日志事件数
+  snapshot_event_limit: 400
+  # Maximum text tail returned per snapshot field / 每个快照文本字段最大字符数
+  snapshot_text_tail_chars: 200000
+  # stdout/stderr characters returned by job status / 任务状态返回的日志尾部字符数
+  job_status_tail_chars: 60000
+  # stdout/stderr characters persisted by the service / 服务落盘保存的日志尾部字符数
+  service_log_tail_chars: 200000
+  # Maximum last-error summary characters / 最后错误摘要最大字符数
+  service_last_error_chars: 300
+  # Save full journal.json / 是否保存完整搜索树
+  save_journal: true
+  # Save filtered_journal.json / 是否保存最优路径投影
+  save_filtered_journal: true
+  # Save resolved config.yaml into run logs / 是否保存运行时最终配置
+  save_resolved_config: true
+  # Save best_solution.py / 是否保存最佳方案代码
+  save_best_solution: true
+
+# Compact, verbose, and console logs / 简略、详细与控制台日志
+logging:
+  # Write compact operational log / 是否写简略运行日志
+  write_brief_log: true
+  # Write detailed verbose log / 是否写详细日志
+  write_verbose_log: true
+  # Echo compact log to stdout / 是否输出简略日志到控制台
+  write_console_log: true
+  # Compact log filename / 简略日志文件名
+  brief_log_filename: "MLEvolve.log"
+  # Detailed log filename / 详细日志文件名
+  verbose_log_filename: "MLEvolve.verbose.log"
+  # Reduce HTTP client noise / 是否压低 HTTP 客户端日志
+  suppress_httpx_logs: true

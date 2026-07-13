@@ -11,7 +11,7 @@ from typing import Callable
 import backoff
 import jsonschema
 from dataclasses_json import DataClassJsonMixin
-from funcy import notnone, once, select_values
+from funcy import notnone, select_values
 from google import genai
 from google.genai import types
 from config import Config
@@ -19,6 +19,7 @@ from .usage import infer_prompt_name, log_llm_usage, estimate_text_tokens
 
 logger = logging.getLogger("MLEvolve")
 NETWORK_RETRY_MAX_ATTEMPTS = 5
+NETWORK_RETRY_BASE_SLEEP_SECONDS = 5.0
 NETWORK_RETRY_MAX_SLEEP_SECONDS = 30.0
 MAX_CONTINUATION_ROUNDS = 2
 CONTINUATION_OVERLAP_SCAN_CHARS = 4096
@@ -44,10 +45,14 @@ def _finish_reason_is_length(finish_reason: str | None) -> bool:
     return any(key in normalized for key in ["max_tokens", "max_output_tokens", "length"])
 
 
-def _append_with_overlap(base: str, addition: str) -> str:
+def _append_with_overlap(
+    base: str,
+    addition: str,
+    max_scan_chars: int = CONTINUATION_OVERLAP_SCAN_CHARS,
+) -> str:
     if not base or not addition:
         return f"{base}{addition}"
-    max_scan = min(len(base), len(addition), CONTINUATION_OVERLAP_SCAN_CHARS)
+    max_scan = min(len(base), len(addition), max(0, int(max_scan_chars)))
     for size in range(max_scan, 15, -1):
         if base[-size:] == addition[:size]:
             return base + addition[size:]
@@ -166,20 +171,19 @@ class FunctionSpec(DataClassJsonMixin):
 #  Gemini client
 # ---------------------------------------------------------------------------
 
-_client: genai.Client = None  # type: ignore
-
-
 GEMINI_TIMEOUT_EXCEPTIONS = (
     Exception,  # Gemini SDK may throw various exceptions
 )
 
 
-@once
-def _setup_gemini_client(cfg: Config):
-    global _client
-    _client = genai.Client(
-        api_key=cfg.agent.code.api_key,
-        http_options={'base_url': cfg.agent.code.base_url, 'timeout': 1200000}
+def _setup_gemini_client(stage):
+    timeout_ms = max(
+        1000,
+        int(float(getattr(stage, "request_timeout_seconds", 1200.0)) * 1000),
+    )
+    return genai.Client(
+        api_key=stage.api_key,
+        http_options={"base_url": stage.base_url, "timeout": timeout_ms},
     )
 
 
@@ -277,13 +281,14 @@ def _is_retryable_error(exc: Exception) -> bool:
 
 def _collect_stream_response(
     *,
+    client: genai.Client,
     model_name: str,
     contents: str,
     generation_config: types.GenerateContentConfig,
 ) -> tuple[str, str, dict, float]:
     """Run one Gemini streaming request and collect raw text, finish reason, usage, and seconds."""
     t0 = time.time()
-    response = _client.models.generate_content_stream(
+    response = client.models.generate_content_stream(
         model=model_name,
         contents=contents,
         config=generation_config,
@@ -317,9 +322,21 @@ def query(
     cfg: Config = None,
     **model_kwargs,
 ) -> tuple[OutputType, float, int, int, dict]:
-    _setup_gemini_client(cfg)
     filtered_kwargs: dict = select_values(notnone, model_kwargs)  # type: ignore
     stage = _stage_config_for_model(cfg, filtered_kwargs.get("model", ""), filtered_kwargs.get("stage_name"))
+    client = _setup_gemini_client(stage)
+    max_attempts = max(
+        1,
+        int(getattr(stage, "network_retry_max_attempts", NETWORK_RETRY_MAX_ATTEMPTS)),
+    )
+    base_sleep = max(
+        0.0,
+        float(getattr(stage, "network_retry_base_sleep_seconds", NETWORK_RETRY_BASE_SLEEP_SECONDS)),
+    )
+    max_sleep = max(
+        0.0,
+        float(getattr(stage, "network_retry_max_sleep_seconds", NETWORK_RETRY_MAX_SLEEP_SECONDS)),
+    )
 
     # Construct contents for Gemini
     contents = []
@@ -357,9 +374,9 @@ def query(
     try:
         last_exc: Exception | None = None
         response = None
-        for attempt in range(1, NETWORK_RETRY_MAX_ATTEMPTS + 1):
+        for attempt in range(1, max_attempts + 1):
             try:
-                response = _client.models.generate_content(
+                response = client.models.generate_content(
                     model=filtered_kwargs.get("model", "gemini-3-pro-preview"),
                     contents=contents,
                     config=generation_config,
@@ -371,18 +388,18 @@ def query(
                 logger.warning(
                     "Gemini query failed (attempt %s/%s, retryable=%s): %s",
                     attempt,
-                    NETWORK_RETRY_MAX_ATTEMPTS,
+                    max_attempts,
                     retryable,
                     e,
                 )
-                if (not retryable) or attempt >= NETWORK_RETRY_MAX_ATTEMPTS:
+                if (not retryable) or attempt >= max_attempts:
                     raise
-                sleep_secs = min(NETWORK_RETRY_MAX_SLEEP_SECONDS, 5.0 * attempt)
+                sleep_secs = min(max_sleep, base_sleep * attempt)
                 logger.warning(
                     "Gemini network error; reconnecting after %.1fs (attempt %s/%s)",
                     sleep_secs,
                     attempt,
-                    NETWORK_RETRY_MAX_ATTEMPTS,
+                    max_attempts,
                 )
                 time.sleep(sleep_secs)
         if response is None and last_exc is not None:
@@ -462,8 +479,8 @@ def generate(
     max_tokens: int | None = None,
     stop_tokens: list[str] | None = None,
     json_schema: dict | None = None,
-    max_retries: int = 5,
-    retry_delay: float = 3,
+    max_retries: int | None = None,
+    retry_delay: float | None = None,
 ) -> str:
     """Streaming text generation via Gemini API.
 
@@ -480,7 +497,58 @@ def generate(
     Returns:
         The generated text (with <think> blocks stripped).
     """
-    _setup_gemini_client(cfg)
+    stage = cfg.agent.code
+    client = _setup_gemini_client(stage)
+    max_retries = max(
+        1,
+        int(
+            max_retries
+            if max_retries is not None
+            else getattr(stage, "generation_max_retries", 5)
+        ),
+    )
+    retry_delay = max(
+        0.0,
+        float(
+            retry_delay
+            if retry_delay is not None
+            else getattr(stage, "generation_retry_delay_seconds", 3.0)
+        ),
+    )
+    max_continuation_rounds = max(
+        0,
+        int(getattr(stage, "continuation_max_rounds", MAX_CONTINUATION_ROUNDS)),
+    )
+    continuation_overlap_scan_chars = max(
+        0,
+        int(
+            getattr(
+                stage,
+                "continuation_overlap_scan_chars",
+                CONTINUATION_OVERLAP_SCAN_CHARS,
+            )
+        ),
+    )
+    network_retry_base_sleep = max(
+        0.0,
+        float(
+            getattr(
+                stage,
+                "network_retry_base_sleep_seconds",
+                NETWORK_RETRY_BASE_SLEEP_SECONDS,
+            )
+        ),
+    )
+    network_retry_max_sleep = max(
+        0.0,
+        float(
+            getattr(
+                stage,
+                "network_retry_max_sleep_seconds",
+                NETWORK_RETRY_MAX_SLEEP_SECONDS,
+            )
+        ),
+    )
 
     # Convert dict/list prompts to markdown string
     if prompt is not None and not isinstance(prompt, str):
@@ -492,10 +560,10 @@ def generate(
         "temperature": temperature if temperature is not None else 1.0,
         "stop_sequences": stop_tokens,
     }
-    resolved_max_tokens = _resolve_max_tokens(max_tokens, cfg.agent.code)
+    resolved_max_tokens = _resolve_max_tokens(max_tokens, stage)
     if resolved_max_tokens is not None:
         config_params["max_output_tokens"] = resolved_max_tokens
-    thinking_level = _gemini_thinking_level(cfg.agent.code, "high")
+    thinking_level = _gemini_thinking_level(stage, "high")
     if thinking_level is not None:
         config_params["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
 
@@ -510,6 +578,7 @@ def generate(
     for attempt in range(max_retries):
         try:
             raw_full_text, final_finish_reason, final_usage, elapsed = _collect_stream_response(
+                client=client,
                 model_name=model_name,
                 contents=str(prompt or ""),
                 generation_config=generation_config,
@@ -555,13 +624,17 @@ def generate(
 
             allow_continuation = json_schema is None
             continuation_round = 0
-            while allow_continuation and _finish_reason_is_length(final_finish_reason) and continuation_round < MAX_CONTINUATION_ROUNDS:
+            while (
+                allow_continuation
+                and _finish_reason_is_length(final_finish_reason)
+                and continuation_round < max_continuation_rounds
+            ):
                 continuation_round += 1
                 logger.warning(
                     "Gemini generate response truncated by max_output_tokens (%s); requesting continuation round %s/%s",
                     config_params.get("max_output_tokens"),
                     continuation_round,
-                    MAX_CONTINUATION_ROUNDS,
+                    max_continuation_rounds,
                 )
                 continuation_prompt = _build_continuation_prompt(
                     str(prompt or ""),
@@ -570,11 +643,16 @@ def generate(
                     round_index=continuation_round,
                 )
                 continuation_text, final_finish_reason, continuation_usage, continuation_elapsed = _collect_stream_response(
+                    client=client,
                     model_name=model_name,
                     contents=continuation_prompt,
                     generation_config=generation_config,
                 )
-                raw_full_text = _append_with_overlap(raw_full_text, continuation_text)
+                raw_full_text = _append_with_overlap(
+                    raw_full_text,
+                    continuation_text,
+                    max_scan_chars=continuation_overlap_scan_chars,
+                )
                 full_text = _strip_visible_thinking(raw_full_text)
                 log_llm_usage(
                     cfg=cfg,
@@ -613,4 +691,9 @@ def generate(
                 raise
             if not retryable:
                 raise
-            time.sleep(min(NETWORK_RETRY_MAX_SLEEP_SECONDS, max(float(retry_delay), 5.0 * (attempt + 1))))
+            time.sleep(
+                min(
+                    network_retry_max_sleep,
+                    max(float(retry_delay), network_retry_base_sleep * (attempt + 1)),
+                )
+            )

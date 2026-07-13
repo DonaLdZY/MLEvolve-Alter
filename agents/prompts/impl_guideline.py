@@ -123,35 +123,35 @@ def get_impl_guideline(
     submission_guideline = (
         [
             "**2. Generate submission.csv**",
-            "鈥?Path: `./submission/submission.csv` (NOT ./working/submission.csv)",
-            "鈥?Content: Model predictions or decision/solution rows for ALL required evaluation units",
-            "鈥?Format: Follow task description exactly",
+            "- Path: `./submission/submission.csv` (not `./working/submission.csv`)",
+            "- Content: model predictions or decision/solution rows for all required evaluation units",
+            "- Format: follow the task description exactly",
             "",
         ]
         if generate_submission
         else [
             "**2. Final submission generation is disabled by config**",
-            "鈥?Do NOT force creation of `./submission/submission.csv`.",
-            "鈥?Focus on a real train/validation pipeline, rigorous metric computation, and reusable inference code.",
-            "鈥?Only create an output file if the task description explicitly requires a non-submission deliverable with a clear schema.",
+            "- Do not force creation of `./submission/submission.csv`.",
+            "- Focus on a real train/validation pipeline, rigorous metric computation, and reusable inference code.",
+            "- Only create an output file if the task explicitly requires a non-submission deliverable with a clear schema.",
             "",
         ]
     )
     directories_guideline = (
-        "馃搧 **Directories**: Input data in `./input/`, submission in `./submission/`, temp files in `./working/`"
+        "**Directories**: input data in `./input/`, submission in `./submission/`, temporary files in `./working/`"
         if generate_submission
-        else "馃搧 **Directories**: Input data in `./input/`, temp files in `./working/`; `./submission/` exists but final submission is not required by config"
+        else "**Directories**: input data in `./input/`, temporary files in `./working/`; `./submission/` exists but final submission is not required by config"
     )
     submission_self_check = (
-        ["鈻?Did I generate submission.csv in correct path with ALL test predictions?"]
+        ["- Did I generate submission.csv at the correct path with all required predictions?"]
         if generate_submission
-        else ["鈻?Did I avoid forcing submission.csv because final submission generation is disabled?"]
+        else ["- Did I avoid forcing submission.csv because final submission generation is disabled?"]
     )
     impl_guideline = [
-        f"**Resource Budget**: Time left 鈮?{_format_time(tot_time_remaining)} | Steps left = {steps_remaining} | Max execution time per run = {humanize.naturaldelta(exec_timeout)}",
+        f"**Resource Budget**: Time left <= {_format_time(tot_time_remaining)} | Steps left = {steps_remaining} | Max execution time per run = {humanize.naturaldelta(exec_timeout)}",
         "",
-        "**Note:** Code execution MUST complete within 9 hours (hard limit) 鈥?any solution exceeding this will be invalid. Within this constraint, prioritize performance and optimization.",
-        "馃幆 **CRITICAL REQUIREMENTS** (Non-Negotiable):",
+        "**Note:** Code execution must complete within the configured hard limit; a solution exceeding it is invalid. Within this constraint, prioritize performance and optimization.",
+        "**CRITICAL REQUIREMENTS** (Non-Negotiable):",
         "",
         "**0. AutoRealize Contract Priority**",
         "- If `./input/autorealize_context.md` exists, read and obey it before using generic assumptions.",
@@ -162,37 +162,37 @@ def get_impl_guideline(
         *inference_guideline,
         *submission_guideline,
         "**3. Save Reusable Model Artifact**",
-        "鈥?MUST save the trained best model and all required preprocessing state to disk under `./working/`, `./models/`, `./artifacts/`, or `./checkpoints/`.",
-        "鈥?Use a standard artifact filename such as `./working/model_artifact.pkl`, `./working/best_model.pt`, or `./working/best_model.joblib`; the executor may rewrite generic filenames per node to avoid conflicts.",
-        "鈥?The artifact must be sufficient for later inference without retraining: include fitted scalers/encoders/tokenizers/label maps/feature columns and model weights, solver state, policy checkpoint, heuristic parameters, or solver configuration.",
-        "鈥?For PyTorch, save a checkpoint dict containing `state_dict` plus preprocessing/config metadata when needed. For sklearn/XGBoost/LightGBM/CatBoost, save the model pipeline or a dict with model plus preprocessing objects using joblib/pickle/native save.",
+        "- MUST save the trained best model and all required preprocessing state under `./working/`, `./models/`, `./artifacts/`, or `./checkpoints/`.",
+        "- Use a standard artifact filename such as `./working/model_artifact.pkl`, `./working/best_model.pt`, or `./working/best_model.joblib`; the executor may rewrite generic filenames per node to avoid conflicts.",
+        "- The artifact must support later inference without retraining: include fitted preprocessing, feature metadata, model weights, solver state, policy checkpoint, heuristic parameters, or solver configuration.",
+        "- For PyTorch, save `state_dict` plus required preprocessing/config metadata. For sklearn and boosting libraries, save the model pipeline or model plus preprocessing state.",
         "",
         "**4. Expose Reusable Inference API**",
-        "鈥?MUST define `def predict(model_path, data): ...` in the final script.",
-        "鈥?`predict(model_path, data)` must load the saved artifact from `model_path`, apply the same preprocessing as validation/test, and return raw predictions, decisions, or the task-required solution object without retraining.",
-        "鈥?Validation inference, test inference, and submission generation must use this function or exactly the same internal inference routine. Do NOT retrain inside `predict`.",
+        "- MUST define `def predict(model_path, data): ...` in the final script.",
+        "- `predict(model_path, data)` must load the saved artifact, apply the same preprocessing as validation/test, and return predictions, decisions, or the required solution without retraining.",
+        "- Validation, test, and submission inference must use this function or the same internal inference routine. Do not retrain inside `predict`.",
         "",
         *metric_guideline,
         directories_guideline,
         "",
-        f"馃摝 **Packages & Internet**: numpy, pandas, sklearn, torch, transformers, timm, xgboost, lightgbm (all pre-installed). torch.hub.load(), HuggingFace, etc. available during development."
+        f"**Packages & Internet**: numpy, pandas, sklearn, torch, transformers, timm, xgboost, and lightgbm are available. Remote model access may be available during development."
         + (f" Offline models at `{pretrain_model_dir}`" if pretrain_model_dir else ""),
         "",
-        "鈿狅笍 **API Compatibility**: LightGBM/XGBoost: 鉂?`fit(..., early_stopping_rounds=...)` 鈫?鉁?LightGBM: `fit(..., callbacks=[lgb.early_stopping(...)])` 鉁?XGBoost: `XGBClassifier(early_stopping_rounds=...)`",
-        "鈥?AdamW: 鉂?`from transformers import AdamW` (deprecated) 鈫?鉁?`from torch.optim import AdamW`",
+        "**API Compatibility**: use the installed LightGBM/XGBoost early-stopping APIs; for LightGBM prefer callbacks where required.",
+        "- AdamW: use `from torch.optim import AdamW`, not deprecated transformer aliases.",
         "",
-        "馃毇 **Execution Guidelines**:",
-        "鈥?NO tqdm (not installed), NO verbose=1",
-        "鈥?Print only 1 line per epoch (minimize logging)",
-        "鈥?Use DataLoader with num_workers>=2 for speed",
+        "**Execution Guidelines**:",
+        "- Avoid tqdm and verbose training output.",
+        "- Print at most one concise line per epoch.",
+        "- Choose DataLoader workers conservatively within the task CPU budget.",
         "",
-        "鈿狅笍  **Self-Check Before Finalizing**:",
-        *[f"鈻?{item}" for item in predict_self_check],
-        "鈻?Did I save the best trained model/preprocessing artifact under ./working, ./models, ./artifacts, or ./checkpoints?",
-        "鈻?Did I define `predict(model_path, data)` and use it or the same inference path for validation/test/submission?",
+        "**Self-Check Before Finalizing**:",
+        *[f"- {item}" for item in predict_self_check],
+        "- Did I save the best model/preprocessing artifact under ./working, ./models, ./artifacts, or ./checkpoints?",
+        "- Did I define `predict(model_path, data)` and use it or the same inference path for validation/test/submission?",
         *submission_self_check,
-        "鈻?Did I print validation metric as the last line?",
-        "鈻?Did I use the COMPLETE training dataset (not a tiny subset)?",
+        "- Did I print the validation metric as the last line?",
+        "- Did I use the complete training dataset rather than a tiny subset?",
     ]
     if expose_prediction:
         impl_guideline.append(

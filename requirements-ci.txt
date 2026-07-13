@@ -1,0 +1,24 @@
+# Lightweight dependencies needed by the deterministic unit tests. The full
+# AutoML stack remains in requirements.txt.
+PyYAML>=6.0.1,<7
+omegaconf>=2.3.0,<3
+pydantic>=2.7.0,<3
+dataclasses-json>=0.6.7,<1
+jsonschema>=4.22.0,<5
+openai>=1.40.0,<3
+google-genai>=1.20.0,<2
+backoff>=2.2.1,<3
+funcy>=2.0,<3
+fastapi>=0.110.0,<1
+requests>=2.31.0,<3
+black>=24.3.0,<27
+coolname>=2.2.0,<3
+genson>=1.3.0,<2
+humanize>=4.8.0,<15
+rich>=13.8.0,<15
+shutup>=0.2.0,<1
+numpy>=1.26.0,<3
+pandas>=2.2.0,<4
+psutil>=5.9.0,<8
+pytest>=8.2.0,<10
+ruff>=0.9.0,<1

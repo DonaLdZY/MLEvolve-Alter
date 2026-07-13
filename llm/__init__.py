@@ -88,8 +88,8 @@ def generate(
     max_tokens=None,
     stop_tokens=None,
     json_schema=None,
-    max_retries=5,
-    retry_delay=3,
+    max_retries=None,
+    retry_delay=None,
 ):
     """Streaming text generation. Dispatches to Gemini or OpenAI-compatible backend by cfg.agent.code.model."""
     model = getattr(cfg.agent.code, "model", "") or ""

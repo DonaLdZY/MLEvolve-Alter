@@ -78,13 +78,15 @@ def run(agent, node: SearchNode) -> str:
         prompt["Instructions"]["⚠️ Internet Access Clarification"] = internet_clarification
 
     use_diff_for_review = agent.acfg.use_diff_mode
-    max_retries = 3
+    retry_cfg = getattr(agent.acfg, "retries", None)
+    max_retries = max(1, int(getattr(retry_cfg, "code_review_max_attempts", 3)))
+    retry_delay = max(0.0, float(getattr(retry_cfg, "code_review_delay_seconds", 5.0)))
 
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 logger.info(f"Code review retry attempt {attempt + 1}/{max_retries} for node {node.id}")
-                time.sleep(5)
+                time.sleep(retry_delay)
 
             review_response = cast(
                 dict,
