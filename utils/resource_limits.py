@@ -436,7 +436,7 @@ def _run_command(args: list[str], *, timeout: float = 8.0) -> str:
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _torch_runtime_info() -> dict[str, Any]:
+def _local_torch_runtime_info() -> dict[str, Any]:
     info: dict[str, Any] = {
         "version": "",
         "cuda_available": False,
@@ -445,6 +445,8 @@ def _torch_runtime_info() -> dict[str, Any]:
         "xpu_available": False,
         "xpu_count": 0,
         "mps_available": False,
+        "python_executable": str(Path(sys.executable).resolve()),
+        "probe_source": "service_runtime",
     }
     try:
         import torch
@@ -461,6 +463,136 @@ def _torch_runtime_info() -> dict[str, Any]:
     except Exception as exc:
         info["error"] = str(exc)
     return info
+
+
+_TORCH_RUNTIME_PROBE = r"""
+import json
+import sys
+
+info = {
+    "version": "",
+    "cuda_available": False,
+    "cuda_count": 0,
+    "hip_version": "",
+    "xpu_available": False,
+    "xpu_count": 0,
+    "mps_available": False,
+    "python_executable": sys.executable,
+    "probe_source": "configured_python",
+    "cuda_devices": [],
+    "xpu_devices": [],
+    "ascend_devices": [],
+}
+try:
+    import torch
+
+    info["version"] = str(getattr(torch, "__version__", ""))
+    info["hip_version"] = str(getattr(getattr(torch, "version", None), "hip", "") or "")
+    info["cuda_available"] = bool(torch.cuda.is_available())
+    info["cuda_count"] = int(torch.cuda.device_count()) if info["cuda_available"] else 0
+    for index in range(info["cuda_count"]):
+        props = torch.cuda.get_device_properties(index)
+        info["cuda_devices"].append({
+            "index": index,
+            "name": str(getattr(props, "name", "") or torch.cuda.get_device_name(index)),
+            "uuid": str(getattr(props, "uuid", "") or ""),
+            "memory_mb": int(getattr(props, "total_memory", 0) / (1024 * 1024)),
+        })
+
+    xpu = getattr(torch, "xpu", None)
+    info["xpu_available"] = bool(xpu is not None and xpu.is_available())
+    info["xpu_count"] = int(xpu.device_count()) if info["xpu_available"] else 0
+    for index in range(info["xpu_count"]):
+        props = xpu.get_device_properties(index)
+        info["xpu_devices"].append({
+            "index": index,
+            "name": str(getattr(props, "name", "") or f"Intel XPU {index}"),
+            "uuid": "",
+            "memory_mb": int(getattr(props, "total_memory", 0) / (1024 * 1024)),
+        })
+
+    try:
+        import torch_npu  # noqa: F401
+        npu = getattr(torch, "npu", None)
+        if npu is not None and npu.is_available():
+            for index in range(int(npu.device_count())):
+                try:
+                    name = str(npu.get_device_name(index))
+                except Exception:
+                    name = f"Ascend NPU {index}"
+                info["ascend_devices"].append({
+                    "index": index,
+                    "name": name,
+                    "uuid": "",
+                    "memory_mb": 0,
+                })
+    except Exception:
+        pass
+
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    info["mps_available"] = bool(mps is not None and mps.is_available())
+except Exception as exc:
+    info["error"] = str(exc)
+print(json.dumps(info, ensure_ascii=True))
+"""
+
+
+def _configured_torch_runtime_info(python_executable: str) -> dict[str, Any]:
+    requested = str(python_executable or "").strip()
+    executable = requested
+    if not executable:
+        return _local_torch_runtime_info()
+    if not Path(executable).expanduser().is_file():
+        executable = shutil.which(executable) or executable
+    base = {
+        "version": "",
+        "cuda_available": False,
+        "cuda_count": 0,
+        "hip_version": "",
+        "xpu_available": False,
+        "xpu_count": 0,
+        "mps_available": False,
+        "python_executable": str(executable),
+        "probe_source": "configured_python",
+    }
+    try:
+        probe_env = os.environ.copy()
+        for name in ACCELERATOR_VISIBILITY_ENV_VARS:
+            probe_env.pop(name, None)
+        proc = subprocess.run(
+            [executable, "-c", _TORCH_RUNTIME_PROBE],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20.0,
+            check=False,
+            env=probe_env,
+        )
+    except Exception as exc:
+        return {**base, "error": f"configured Python probe failed: {exc}"}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return {**base, "error": f"configured Python probe exited with {proc.returncode}: {detail[-1000:]}"}
+    payload = None
+    for line in reversed((proc.stdout or "").splitlines()):
+        try:
+            candidate = json.loads(line.strip())
+        except Exception:
+            continue
+        if isinstance(candidate, dict):
+            payload = candidate
+            break
+    if payload is None:
+        exc = "no JSON object found"
+        return {**base, "error": f"configured Python returned invalid probe output: {exc}"}
+    return {**base, **payload}
+
+
+def _torch_runtime_info(python_executable: str | None = None) -> dict[str, Any]:
+    if python_executable is None or not str(python_executable).strip():
+        return _local_torch_runtime_info()
+    return _configured_torch_runtime_info(str(python_executable))
 
 
 def _nvidia_devices(torch_info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -509,6 +641,25 @@ def _torch_cuda_or_rocm_devices(torch_info: dict[str, Any]) -> list[dict[str, An
     backend = "rocm" if is_rocm else "cuda"
     vendor = "AMD" if is_rocm else "NVIDIA"
     visibility_env = "HIP_VISIBLE_DEVICES" if is_rocm else "CUDA_VISIBLE_DEVICES"
+    runtime_rows = torch_info.get("cuda_devices")
+    if isinstance(runtime_rows, list):
+        return [
+            {
+                "id": f"{backend}:{int(row.get('index') or 0)}",
+                "backend": backend,
+                "index": int(row.get("index") or 0),
+                "name": str(row.get("name") or f"{vendor} GPU"),
+                "vendor": vendor,
+                "uuid": str(row.get("uuid") or ""),
+                "memory_mb": int(row.get("memory_mb") or 0),
+                "visibility_env": visibility_env,
+                "visibility_supported": True,
+                "runtime_available": True,
+                "source": "configured_python.torch",
+            }
+            for row in runtime_rows
+            if isinstance(row, dict)
+        ]
     devices: list[dict[str, Any]] = []
     try:
         import torch
@@ -538,6 +689,25 @@ def _torch_cuda_or_rocm_devices(torch_info: dict[str, Any]) -> list[dict[str, An
 def _torch_xpu_devices(torch_info: dict[str, Any]) -> list[dict[str, Any]]:
     if not torch_info.get("xpu_available"):
         return []
+    runtime_rows = torch_info.get("xpu_devices")
+    if isinstance(runtime_rows, list):
+        return [
+            {
+                "id": f"xpu:{int(row.get('index') or 0)}",
+                "backend": "xpu",
+                "index": int(row.get("index") or 0),
+                "name": str(row.get("name") or "Intel XPU"),
+                "vendor": "Intel",
+                "uuid": str(row.get("uuid") or ""),
+                "memory_mb": int(row.get("memory_mb") or 0),
+                "visibility_env": "ZE_AFFINITY_MASK",
+                "visibility_supported": True,
+                "runtime_available": True,
+                "source": "configured_python.torch.xpu",
+            }
+            for row in runtime_rows
+            if isinstance(row, dict)
+        ]
     devices: list[dict[str, Any]] = []
     try:
         import torch
@@ -564,7 +734,26 @@ def _torch_xpu_devices(torch_info: dict[str, Any]) -> list[dict[str, Any]]:
     return devices
 
 
-def _torch_ascend_devices() -> list[dict[str, Any]]:
+def _torch_ascend_devices(torch_info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    runtime_rows = (torch_info or {}).get("ascend_devices")
+    if isinstance(runtime_rows, list):
+        return [
+            {
+                "id": f"ascend:{int(row.get('index') or 0)}",
+                "backend": "ascend",
+                "index": int(row.get("index") or 0),
+                "name": str(row.get("name") or "Ascend NPU"),
+                "vendor": "Huawei",
+                "uuid": str(row.get("uuid") or ""),
+                "memory_mb": int(row.get("memory_mb") or 0),
+                "visibility_env": "ASCEND_RT_VISIBLE_DEVICES",
+                "visibility_supported": True,
+                "runtime_available": True,
+                "source": "configured_python.torch_npu",
+            }
+            for row in runtime_rows
+            if isinstance(row, dict)
+        ]
     try:
         import torch
         import torch_npu  # noqa: F401
@@ -656,14 +845,14 @@ def accelerator_visibility_capabilities(devices: Iterable[dict[str, Any]]) -> di
     }
 
 
-def detect_resource_inventory() -> dict[str, Any]:
-    torch_info = _torch_runtime_info()
+def detect_resource_inventory(python_executable: str | None = None) -> dict[str, Any]:
+    torch_info = _torch_runtime_info(python_executable)
     devices = _nvidia_devices(torch_info)
     known_ids = {str(item.get("id")) for item in devices}
     runtime_devices = (
         _torch_cuda_or_rocm_devices(torch_info)
         + _torch_xpu_devices(torch_info)
-        + _torch_ascend_devices()
+        + _torch_ascend_devices(torch_info)
         + _macos_mps_devices(torch_info)
     )
     for item in runtime_devices:

@@ -22,9 +22,14 @@ def test_commented_default_yaml_matches_runtime_schema() -> None:
     assert merged.agent.search.num_drafts == 8
     assert merged.agent.search.num_improves == 5
     assert merged.agent.draft.fast_first_draft is True
+    assert merged.agent.draft.stepwise_stage_context is True
     assert merged.agent.code.request_timeout_seconds == 1200.0
     assert merged.agent.code.continuation_max_rounds == 2
     assert merged.agent.retries.result_parse_max_attempts == 3
+    assert merged.agent.retries.code_review_model_role == "feedback"
+    assert merged.agent.retries.code_review_escalate_to_code is True
+    assert merged.agent.retries.code_generation_extract_max_attempts == 2
+    assert merged.agent.retries.human_insight_async is True
     assert merged.resources.cpu_cores == 4
     assert merged.resources.memory_limit_gb == 8.0
     assert merged.resources.accelerator_mode == "all"

@@ -1,8 +1,8 @@
-import copy
 import json
 import os
 from pathlib import Path
-from typing import Type, TypeVar
+import threading
+from typing import Any, Type, TypeVar
 import time
 import uuid
 
@@ -14,25 +14,20 @@ def _get_journal_cls():
     return Journal
 
 
-def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
+def dumps_json(obj: Any):
     """Serialize dataclasses (such as Journals) to JSON."""
     Journal = _get_journal_cls()
     if isinstance(obj, Journal):
-        obj = copy.deepcopy(obj)
-        node2parent = {n.id: n.parent.id for n in obj.nodes if n.parent is not None}
-        node2best_local_node = {n.id: n.local_best_node.id for n in obj.nodes if n.local_best_node is not None and n.local_best_node.metric.value is not None}
-        for n in obj.nodes:
-            n.parent = None
-            n.local_best_node = None
-            n.child_count_lock = None
-            n.children = set()
+        from engine.journal_snapshot import JournalSnapshot
 
-    obj_dict = obj.to_dict()
+        obj_dict = JournalSnapshot.from_journal(obj).to_payload()
+    else:
+        from engine.journal_snapshot import JournalSnapshot
 
-    if isinstance(obj, Journal):
-        obj_dict["node2parent"] = node2parent  # type: ignore
-        obj_dict["node2best_local_node"] = node2best_local_node
-        obj_dict["__version"] = "2"
+        if isinstance(obj, JournalSnapshot):
+            obj_dict = obj.to_payload()
+        else:
+            obj_dict = obj.to_dict()
 
     def _json_default(o):
         if isinstance(o, Path):
@@ -50,7 +45,7 @@ def dumps_json(obj: dataclasses_json.DataClassJsonMixin):
     return json.dumps(obj_dict, separators=(",", ":"), default=_json_default)
 
 
-def dump_json(obj: dataclasses_json.DataClassJsonMixin, path: Path):
+def dump_json(obj: Any, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     data = dumps_json(obj)
@@ -86,13 +81,25 @@ def loads_json(s: str, cls: Type[G]) -> G:
     """Deserialize JSON to dataclasses."""
     Journal = _get_journal_cls()
     obj_dict = json.loads(s)
+    if cls is Journal and str(obj_dict.get("__version", "2")) == "3":
+        from engine.journal_snapshot import JournalSnapshot
+
+        return JournalSnapshot.from_payload(obj_dict).to_journal()
+
     obj = cls.from_dict(obj_dict)
 
     if isinstance(obj, Journal):
         id2nodes = {n.id: n for n in obj.nodes}
-        for child_id, parent_id in obj_dict["node2parent"].items():
-            id2nodes[child_id].parent = id2nodes[parent_id]
-            id2nodes[child_id].__post_init__()
+        for node in obj.nodes:
+            node.children = set()
+            node.child_count_lock = threading.Lock()
+        for child_id, parent_id in (obj_dict.get("node2parent") or {}).items():
+            if child_id in id2nodes and parent_id in id2nodes:
+                id2nodes[child_id].parent = id2nodes[parent_id]
+                id2nodes[parent_id].children.add(id2nodes[child_id])
+        for node_id, local_best_id in (obj_dict.get("node2best_local_node") or {}).items():
+            if node_id in id2nodes and local_best_id in id2nodes:
+                id2nodes[node_id].local_best_node = id2nodes[local_best_id]
     return obj
 
 

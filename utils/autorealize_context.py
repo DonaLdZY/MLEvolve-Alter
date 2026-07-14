@@ -18,6 +18,163 @@ logger = logging.getLogger("MLEvolve")
 CONTEXT_MARKER = "AutoRealize Structured Context"
 MIN_PROMPT_READY_CONTEXT_CHARS = 900
 
+_STAGE_CONTEXT_SECTIONS: dict[str, set[str] | None] = {
+    # Data loading owns the full physical schema and all table-level caveats.
+    "data_processing_and_feature_engineering": None,
+    "evaluator_and_constraint_checker": {
+        "autorealize structured context",
+        "priority rules",
+        "exact source schema contract",
+        "source alias guard",
+        "entity alias candidates",
+        "minimal task reference",
+        "evaluation contract reference",
+        "output contract reference",
+        "relation cards",
+        "problem boundary reference",
+        "constraints reference",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "data access",
+        "modeling boundary",
+        "constraints",
+    },
+    "rl_environment_design": {
+        "autorealize structured context",
+        "priority rules",
+        "entity alias candidates",
+        "minimal task reference",
+        "method strategy",
+        "evaluation contract reference",
+        "output contract reference",
+        "relation cards",
+        "problem boundary reference",
+        "constraints reference",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "modeling boundary",
+        "constraints",
+    },
+    "model_design": {
+        "autorealize structured context",
+        "priority rules",
+        "minimal task reference",
+        "method strategy",
+        "evaluation contract reference",
+        "output contract reference",
+        "problem boundary reference",
+        "constraints reference",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "modeling boundary",
+        "constraints",
+    },
+    "training_evaluation": {
+        "autorealize structured context",
+        "priority rules",
+        "minimal task reference",
+        "method strategy",
+        "evaluation contract reference",
+        "output contract reference",
+        "problem boundary reference",
+        "constraints reference",
+        "leakage guards",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "modeling boundary",
+        "constraints",
+    },
+    "merge": {
+        "autorealize structured context",
+        "priority rules",
+        "minimal task reference",
+        "method strategy",
+        "evaluation contract reference",
+        "output contract reference",
+        "problem boundary reference",
+        "constraints reference",
+        "leakage guards",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "modeling boundary",
+        "constraints",
+    },
+    "code_review": {
+        "autorealize structured context",
+        "priority rules",
+        "exact source schema contract",
+        "source alias guard",
+        "minimal task reference",
+        "evaluation contract reference",
+        "output contract reference",
+        "problem boundary reference",
+        "constraints reference",
+        "leakage guards",
+        "pitfalls",
+        "problem and goal",
+        "evaluation contract",
+        "output contract",
+        "data access",
+        "modeling boundary",
+        "constraints",
+    },
+}
+
+
+def select_autorealize_context_for_stage(text: str, stage: str) -> str:
+    """Select complete AutoRealize contract sections needed by one code stage.
+
+    This is section routing, not character truncation. Unknown/non-AutoRealize
+    inputs are returned unchanged so standalone MLEvolve behavior is preserved.
+    """
+
+    source = str(text or "").strip()
+    selected = _STAGE_CONTEXT_SECTIONS.get(str(stage or "").strip())
+    if not source or CONTEXT_MARKER.lower() not in source.lower() or selected is None:
+        return source
+    if str(stage or "").strip() not in _STAGE_CONTEXT_SECTIONS:
+        return source
+
+    all_headings = list(re.finditer(r"(?m)^(#{2,3})\s+([^\r\n]+?)\s*$", source))
+    marker_index = next(
+        (
+            index
+            for index, match in enumerate(all_headings)
+            if match.group(2).strip().lower() == CONTEXT_MARKER.lower()
+        ),
+        None,
+    )
+    if marker_index is None or marker_index + 1 >= len(all_headings):
+        return source
+    section_level = len(all_headings[marker_index + 1].group(1))
+    matches = [
+        match
+        for match in all_headings[marker_index:]
+        if match is all_headings[marker_index] or len(match.group(1)) == section_level
+    ]
+    if not matches:
+        return source
+    parts: list[str] = []
+    prefix = source[: matches[0].start()].strip()
+    if prefix:
+        parts.append(prefix)
+    for index, match in enumerate(matches):
+        title = match.group(2).strip().lower()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(source)
+        if title in selected:
+            parts.append(source[match.start() : end].strip())
+    return "\n\n".join(parts).strip() or source
+
 
 def _safe_read_json(path: Path) -> Any:
     try:

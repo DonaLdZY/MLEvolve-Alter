@@ -3,6 +3,20 @@
 from __future__ import annotations
 
 
+PLAN_AND_CODE_RESPONSE_FORMAT = (
+    "Return only these two items in this order: "
+    "(1) a 1-3 sentence implementation plan, then "
+    "(2) exactly one fenced Python code block. "
+    "Do not add headings, extra code fences, or text after the code block."
+)
+
+
+def plan_and_code_response_format(scope: str = "the requested implementation") -> str:
+    """One canonical response contract for all full-code generation prompts."""
+
+    return f"{PLAN_AND_CODE_RESPONSE_FORMAT} The code block must contain only {scope}."
+
+
 OPTIMIZATION_RL_KEYWORDS = (
     "reinforcement learning",
     "offline rl",
@@ -210,10 +224,8 @@ def prompt_leakage_prevention():
 def prompt_resp_fmt():
     """Response format for plan + code"""
     return {
-        "Response format": (
-            "Your response should be a brief outline/sketch of your proposed solution in natural language, "
-            "followed by a single markdown code block (wrapped in ```) which implements this solution and prints out the evaluation metric. "
-            "There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block. "
+        "Response format": plan_and_code_response_format(
+            "the complete runnable solution, including the required validation metric output"
         )
     }
 

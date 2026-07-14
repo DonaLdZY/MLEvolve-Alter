@@ -9,6 +9,7 @@ from engine.search_node import SearchNode
 from agents.prompts.validation_template_prompts import get_code_review_prompt
 from agents.prompts import get_internet_clarification
 from agents.prompt_cache import task_section
+from utils.autorealize_context import select_autorealize_context_for_stage
 
 from agents.coder.diff_coder import SearchReplacePatcher
 
@@ -64,8 +65,15 @@ CODE_REVIEW_SPEC = FunctionSpec(
 def run(agent, node: SearchNode) -> str:
     logger.debug(f"[review] node {node.id}")
 
+    review_context = select_autorealize_context_for_stage(
+        str(getattr(agent, "autorealize_context", "") or ""),
+        "code_review",
+    )
+    review_task_desc = str(agent.task_desc or "")
+    if review_context:
+        review_task_desc = f"{review_task_desc}\n\n{review_context}".strip()
     prompt = get_code_review_prompt(
-        task_desc=agent.task_desc,
+        task_desc=review_task_desc,
         code=node.code,
         submission_required=getattr(agent.acfg, "generate_submission", True),
     )
@@ -79,14 +87,30 @@ def run(agent, node: SearchNode) -> str:
 
     use_diff_for_review = agent.acfg.use_diff_mode
     retry_cfg = getattr(agent.acfg, "retries", None)
-    max_retries = max(1, int(getattr(retry_cfg, "code_review_max_attempts", 3)))
+    max_retries = max(1, int(getattr(retry_cfg, "code_review_max_attempts", 2)))
     retry_delay = max(0.0, float(getattr(retry_cfg, "code_review_delay_seconds", 5.0)))
+    primary_role = str(getattr(retry_cfg, "code_review_model_role", "feedback") or "feedback").strip().lower()
+    if primary_role not in {"feedback", "code"}:
+        logger.warning("Unknown code_review_model_role=%r; using feedback", primary_role)
+        primary_role = "feedback"
+    roles = [primary_role]
+    if bool(getattr(retry_cfg, "code_review_escalate_to_code", True)) and primary_role != "code":
+        roles.append("code")
+    roles = roles[:max_retries]
 
-    for attempt in range(max_retries):
+    for attempt, role in enumerate(roles):
         try:
             if attempt > 0:
-                logger.info(f"Code review retry attempt {attempt + 1}/{max_retries} for node {node.id}")
+                logger.info(
+                    "Escalating code review to role=%s (attempt %s/%s) for node %s",
+                    role,
+                    attempt + 1,
+                    len(roles),
+                    node.id,
+                )
                 time.sleep(retry_delay)
+
+            stage_cfg = agent.acfg.feedback if role == "feedback" else agent.acfg.code
 
             review_response = cast(
                 dict,
@@ -96,13 +120,13 @@ def run(agent, node: SearchNode) -> str:
                         "Instructions": prompt.get("Instructions", {}),
                     },
                     user_message=(
-                        f"{task_section(agent.task_desc)}\n"
+                        f"{task_section(review_task_desc)}\n"
                         f"# Code to review\n{prompt.get('Code to review', '')}"
                     ),
                     func_spec=CODE_REVIEW_SPEC,
-                    model=agent.acfg.code.model,
-                    temperature=agent.acfg.code.temp,
-                    stage_name="code",
+                    model=stage_cfg.model,
+                    temperature=stage_cfg.temp,
+                    stage_name=role,
                     cfg=agent.cfg
                 ),
             )
@@ -110,7 +134,12 @@ def run(agent, node: SearchNode) -> str:
             needs_revision = review_response.get("needs_revision", False)
             reasoning = review_response.get("reasoning", "")
             revised_code = review_response.get("revised_code")
-            logger.info(f"Code review for node {node.id}: needs_revision={needs_revision}")
+            logger.info(
+                "Code review for node %s using role=%s: needs_revision=%s",
+                node.id,
+                role,
+                needs_revision,
+            )
             logger.info(f"Reasoning: {reasoning}", extra={"verbose": True})
 
             if needs_revision:
@@ -127,28 +156,37 @@ def run(agent, node: SearchNode) -> str:
                             if count > 0 and patched_code and patched_code != node.code:
                                 logger.info(f"Successfully applied {count} review patch(es)")
                                 return patched_code.strip()
-                            logger.warning(
-                                f"Diff patch failed (count={count}), keeping original code to avoid writing raw diff to runfile"
-                            )
-                            return node.code
+                            raise ValueError(f"review diff did not apply (count={count})")
                         except Exception as e:
                             logger.warning(
-                                f"Failed to apply diff patch in code review: {e}, keeping original code to avoid writing raw diff to runfile"
+                                "Failed to apply %s review patch: %s",
+                                role,
+                                e,
                             )
+                            if attempt < len(roles) - 1:
+                                continue
                             return node.code
                     else:
                         # Full code revision (original behavior)
                         if use_diff_for_review:
+                            logger.warning(
+                                "%s reviewer returned full code while diff mode is enabled.",
+                                role,
+                            )
+                            if attempt < len(roles) - 1:
+                                continue
                             return node.code
                         else:
                             logger.info("Using revised code from reviewer")
                             return revised_code.strip()
 
-                if attempt < max_retries - 1:
-                    logger.warning(f"Code review violation: needs_revision=True but revised_code is empty/None - Will retry ({attempt + 1}/{max_retries})")
+                if attempt < len(roles) - 1:
+                    logger.warning(
+                        "Code review requested a revision without an applicable patch; escalating."
+                    )
                     logger.info(f"Reasoning detail: {reasoning}", extra={"verbose": True})
                     continue
-                logger.error(f"Code review violation: needs_revision=True but revised_code is empty/None - Max retries reached, returning original code")
+                logger.error("Code review requested a revision without an applicable patch; returning original code")
                 logger.info(f"Reasoning detail: {reasoning}", extra={"verbose": True})
                 return node.code
 
@@ -162,10 +200,10 @@ def run(agent, node: SearchNode) -> str:
 
         except Exception as e:
             error_msg = f"Code review failed with exception: {e}"
-            if attempt < max_retries - 1:
-                logger.warning(f"{error_msg} - Will retry (attempt {attempt + 1}/{max_retries})")
+            if attempt < len(roles) - 1:
+                logger.warning("%s - escalating to the next review role", error_msg)
                 continue
-            logger.error(f"{error_msg} - Max retries reached, returning original code")
+            logger.error(f"{error_msg} - returning original code")
             return node.code
 
     logger.error("Code review: Unexpected exit from retry loop, returning original code")

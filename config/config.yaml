@@ -156,13 +156,23 @@ agent:
     show_pending_draft_nodes: true
     # Delay between deferred draft submissions / 草稿执行提交间隔秒数
     submission_stagger_seconds: 10.0
+    # Route AutoRealize sections to only the step that needs them / 按 step 路由 AutoRealize 章节，避免每步重复全量上下文
+    stepwise_stage_context: true
 
   # Agent-level review and structured-output retries / Agent 评审与结构化输出重试
   retries:
-    # Code-review attempts / 代码审查最大尝试次数
-    code_review_max_attempts: 3
+    # Maximum role-level review attempts; network retries are handled separately / 审查模型角色级最大尝试次数，网络重试单独处理
+    code_review_max_attempts: 2
     # Delay before repeated code review / 代码审查重试等待秒数
     code_review_delay_seconds: 5.0
+    # feedback is faster; code uses the main coding model / feedback 更快，code 使用主编码模型
+    code_review_model_role: "feedback"
+    # Escalate malformed or unpatchable feedback review once / feedback 审查异常或补丁不可用时升级一次到主模型
+    code_review_escalate_to_code: true
+    # Full code-generation attempts after extraction failure / 无法提取有效代码时的完整重新生成次数
+    code_generation_extract_max_attempts: 2
+    # Generate UI prose insight in background after parser facts are ready / parser 事实就绪后在后台生成前端 insight
+    human_insight_async: true
     # Metric-direction inference attempts / 指标方向判断最大尝试次数
     metric_direction_max_attempts: 3
     # Metric-direction retry delay / 指标方向判断重试等待秒数

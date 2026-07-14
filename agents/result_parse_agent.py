@@ -2,6 +2,7 @@ import logging
 import json
 import math
 import re
+import threading
 import time
 from typing import cast
 
@@ -25,6 +26,9 @@ from agents.prompt_cache import task_section
 from agents.prompts import is_optimization_or_rl_task
 
 logger = logging.getLogger("MLEvolve")
+
+_HUMAN_INSIGHT_THREADS: dict[str, threading.Thread] = {}
+_HUMAN_INSIGHT_THREADS_LOCK = threading.Lock()
 
 FINAL_SCORE_RE = re.compile(
     r"Final\s+Validation\s+Score\s*[:=]\s*"
@@ -109,18 +113,13 @@ def _human_insight_fingerprint(node: SearchNode, parser_analysis: str | None) ->
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
-def _generate_human_node_insight(agent, node: SearchNode, parser_generated: bool, *, force: bool = False) -> None:
-    """Generate a human-facing LLM insight without replacing parser facts."""
-    parser_analysis = node.parser_analysis or node.analysis
-    fingerprint = _human_insight_fingerprint(node, parser_analysis)
-    if (
-        not force
-        and node.llm_insight
-        and getattr(node, "_llm_insight_fingerprint", None) == fingerprint
-    ):
-        return
-
-    payload = {
+def _human_insight_payload(
+    agent,
+    node: SearchNode,
+    parser_generated: bool,
+    parser_analysis: str | None,
+) -> dict:
+    return {
         "task_type": "optimization_or_rl" if _is_optimization_or_rl_agent(agent) else "standard_ml",
         "parser_source": "deterministic_parser" if parser_generated else "llm_review_summary",
         "stage": node.stage,
@@ -133,6 +132,9 @@ def _generate_human_node_insight(agent, node: SearchNode, parser_generated: bool
         "plan_excerpt": trim_long_string(node.plan or "", threshold=1200, k=600),
         "execution_tail": (node.term_out or "")[-1600:],
     }
+
+
+def _request_human_node_insight(agent, payload: dict) -> str:
     system_message = (
         "You write short UI-facing insights for AutoML search nodes. "
         "The parser facts are authoritative: do not change metrics, counts, validity, or warnings. "
@@ -141,30 +143,111 @@ def _generate_human_node_insight(agent, node: SearchNode, parser_generated: bool
         "Return only the structured JSON field requested."
     )
     user_message = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    response = cast(
+        dict,
+        query(
+            system_message=system_message,
+            user_message=user_message,
+            func_spec=NODE_INSIGHT_FUNC_SPEC,
+            model=agent.acfg.feedback.model,
+            temperature=agent.acfg.feedback.temp,
+            stage_name="feedback",
+            cfg=agent.cfg,
+        ),
+    )
+    return str(response.get("insight") or "").strip()
+
+
+def _set_fallback_human_insight(node: SearchNode) -> str:
+    fallback = _fallback_human_insight(node, node.parser_analysis or node.analysis)
+    node.llm_insight = fallback
+    return fallback
+
+
+def _generate_human_node_insight(agent, node: SearchNode, parser_generated: bool, *, force: bool = False) -> None:
+    """Synchronously generate a human-facing insight for direct callers/tests."""
+
+    parser_analysis = node.parser_analysis or node.analysis
+    fingerprint = _human_insight_fingerprint(node, parser_analysis)
+    if (
+        not force
+        and node.llm_insight
+        and getattr(node, "_llm_insight_fingerprint", None) == fingerprint
+    ):
+        return
+    payload = _human_insight_payload(agent, node, parser_generated, parser_analysis)
     try:
-        response = cast(
-            dict,
-            query(
-                system_message=system_message,
-                user_message=user_message,
-                func_spec=NODE_INSIGHT_FUNC_SPEC,
-                model=agent.acfg.feedback.model,
-                temperature=agent.acfg.feedback.temp,
-                stage_name="feedback",
-                cfg=agent.cfg,
-            ),
-        )
-        insight = str(response.get("insight") or "").strip()
-        node.llm_insight = insight or _fallback_human_insight(node, parser_analysis)
+        insight = _request_human_node_insight(agent, payload)
+        if _human_insight_fingerprint(node, node.parser_analysis or node.analysis) == fingerprint:
+            node.llm_insight = insight or _fallback_human_insight(node, parser_analysis)
+            setattr(node, "_llm_insight_fingerprint", fingerprint)
     except Exception as e:
         logger.warning("[parse] failed to generate human node insight for %s: %s", node.id, e)
-        node.llm_insight = _fallback_human_insight(node, parser_analysis)
-    setattr(node, "_llm_insight_fingerprint", fingerprint)
+        _set_fallback_human_insight(node)
+        setattr(node, "_llm_insight_fingerprint", fingerprint)
+
+
+def _schedule_human_node_insight(agent, node: SearchNode, parser_generated: bool = True) -> None:
+    """Schedule LLM prose without blocking validation or search-tree insertion."""
+
+    parser_analysis = node.parser_analysis or node.analysis
+    fingerprint = _human_insight_fingerprint(node, parser_analysis)
+    if getattr(node, "_llm_insight_fingerprint", None) == fingerprint:
+        return
+    if getattr(node, "_llm_insight_pending_fingerprint", None) == fingerprint:
+        return
+
+    _set_fallback_human_insight(node)
+    setattr(node, "_llm_insight_pending_fingerprint", fingerprint)
+    payload = _human_insight_payload(agent, node, parser_generated, parser_analysis)
+
+    def worker() -> None:
+        insight = ""
+        try:
+            insight = _request_human_node_insight(agent, payload)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[parse] async human insight failed for %s: %s", node.id, exc)
+
+        lock = getattr(agent, "journal_lock", None)
+
+        def apply_result() -> None:
+            latest = _human_insight_fingerprint(node, node.parser_analysis or node.analysis)
+            if latest == fingerprint:
+                if insight:
+                    node.llm_insight = insight
+                setattr(node, "_llm_insight_fingerprint", fingerprint)
+            if getattr(node, "_llm_insight_pending_fingerprint", None) == fingerprint:
+                setattr(node, "_llm_insight_pending_fingerprint", None)
+
+        if lock is None:
+            apply_result()
+        else:
+            with lock:
+                apply_result()
+
+        with _HUMAN_INSIGHT_THREADS_LOCK:
+            if _HUMAN_INSIGHT_THREADS.get(node.id) is threading.current_thread():
+                _HUMAN_INSIGHT_THREADS.pop(node.id, None)
+
+    thread = threading.Thread(
+        target=worker,
+        name=f"node-insight-{node.id[:8]}",
+        daemon=True,
+    )
+    # Runtime handles must never be attached to SearchNode: journals deepcopy
+    # and serialize nodes while this request is still running.
+    with _HUMAN_INSIGHT_THREADS_LOCK:
+        _HUMAN_INSIGHT_THREADS[node.id] = thread
+    thread.start()
 
 
 def refresh_human_node_insight(agent, node: SearchNode) -> SearchNode:
     """Refresh the UI-facing insight after later validator steps update parser facts."""
-    _generate_human_node_insight(agent, node, parser_generated=True)
+    retry_cfg = getattr(agent.acfg, "retries", None)
+    if bool(getattr(retry_cfg, "human_insight_async", True)):
+        _schedule_human_node_insight(agent, node, parser_generated=True)
+    else:
+        _generate_human_node_insight(agent, node, parser_generated=True)
     return node
 
 
@@ -374,6 +457,23 @@ def determine_metric_direction(agent) -> None:
     logger.info("=" * 80)
     logger.info("Starting pre-determination of metric optimization direction...")
     logger.info("=" * 80)
+
+    authoritative_context = str(getattr(agent, "autorealize_context", "") or "")
+    direction_match = re.search(
+        r"(?im)^\s*[-*]?\s*metric_direction\s*:\s*`?(minimize|maximize)\b",
+        authoritative_context,
+    )
+    if direction_match:
+        direction = direction_match.group(1).lower()
+        agent.metric_maximize = direction == "maximize"
+        agent.metric_maximize_reasoning = (
+            f"AutoRealize evaluation contract explicitly sets metric_direction={direction}."
+        )
+        logger.info(
+            "Metric direction loaded directly from AutoRealize contract: maximize=%s",
+            agent.metric_maximize,
+        )
+        return
 
     prompt = """You are analyzing a machine learning competition task. Your task is to determine whether the evaluation metric should be minimized or maximized.
 
@@ -819,7 +919,7 @@ def _apply_review_response(agent, node: SearchNode, response: dict) -> SearchNod
         and has_scorable_decision_run(agent, node)
     )
 
-    parser_generated = bool(response.pop("_parser_generated", False))
+    response.pop("_parser_generated", False)
     decision_summary = response.pop("_decision_summary", None)
     _set_parser_analysis(node, response["summary"])
     node.decision_signals = _decision_signals_for_node(decision_summary, response.get("metric"))
@@ -860,7 +960,7 @@ def _apply_review_response(agent, node: SearchNode, response: dict) -> SearchNod
         _validate_metric_direction(agent, node, response)
         _check_data_leakage(agent, node, response)
     node.parser_analysis = node.analysis
-    _generate_human_node_insight(agent, node, parser_generated=parser_generated)
+    _set_fallback_human_insight(node)
 
     status = "FAIL" if node.is_buggy else "PASS"
     metric_val = node.metric.value if node.metric else None
@@ -878,8 +978,8 @@ def _try_deterministic_parse(agent, node: SearchNode) -> SearchNode | None:
         node.metric = WorstMetricValue()
         _set_parser_analysis(node, _compact_failure_summary(node))
         node.decision_signals = None
-        _generate_human_node_insight(agent, node, parser_generated=True)
-        logger.info("[parse] node %s: deterministic failure parse, generated human insight", node.id)
+        _set_fallback_human_insight(node)
+        logger.info("[parse] node %s: deterministic failure parse", node.id)
         return node
 
     score = _extract_final_validation_score(node.term_out)
@@ -973,5 +1073,5 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
     node.is_buggy = True
     node.metric = WorstMetricValue()
     _set_parser_analysis(node, "Execution result parsing failed after multiple attempts.")
-    _generate_human_node_insight(agent, node, parser_generated=True)
+    _set_fallback_human_insight(node)
     return node

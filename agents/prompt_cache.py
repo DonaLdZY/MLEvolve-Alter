@@ -72,3 +72,17 @@ def context_fingerprint(text: Any) -> str:
     if not value:
         return "empty"
     return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:12]
+
+
+def routed_data_context(agent: Any, stage: str) -> str:
+    """Return a stage-specific AutoRealize view when routing is enabled."""
+
+    preview = _norm(getattr(agent, "data_preview", ""))
+    enabled = bool(
+        getattr(getattr(getattr(agent, "acfg", None), "draft", None), "stepwise_stage_context", True)
+    )
+    if not enabled:
+        return preview
+    from utils.autorealize_context import select_autorealize_context_for_stage
+
+    return select_autorealize_context_for_stage(preview, stage)

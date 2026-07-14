@@ -19,7 +19,7 @@ from agents.planner import run_planner, build_planner_task, build_planner_suffix
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from agents.triggers import register_node
-from agents.prompt_cache import dataset_reference_sentence, task_section
+from agents.prompt_cache import dataset_reference_sentence, routed_data_context, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -119,58 +119,9 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     else:
         prompt["Instructions"] |= {
             "🔬 Critical: Scientific Approach to Evolution": [
-                "",
-                "⚠️ **MANDATORY FORMAT REQUIREMENT**",
-                "You MUST structure your plan using the following EXACT format:",
-                "",
-                "```",
-                "CHANGES (list ALL modifications, one or multiple):",
-                "",
-                "Change #1: [Category: Data Augmentation / Model Architecture / Loss Function / Optimization / Regularization / Training Strategy]",
-                "- What: [Describe the SPECIFIC technical modification you will make]",
-                "- Why: [Based on trajectory, explain why THIS TASK needs this specific change]",
-                "",
-                "Change #2 (if applicable): [Category]",
-                "- What: [Describe the SPECIFIC technical modification]",
-                "- Why: [Based on trajectory, explain why THIS TASK needs this specific change]",
-                "",
-                "[Add more changes if needed, but keep them focused and related]",
-                "",
-                "---",
-                "",
-                "WHY current solution limited (based on trajectory analysis):",
-                "- Root cause: [What patterns from evolution history reveal the limitation?]",
-                "- Evidence: [Specific steps/metrics from trajectory that support this diagnosis]",
-                "",
-                "HOW these changes build on learned patterns:",
-                "- Mechanism: [How does this apply lessons from successful/failed steps in trajectory?]",
-                "- Expected improvement: [Concrete prediction based on trajectory patterns]",
-                "- Trajectory insight: [What specific lesson from evolution history guides this choice?]",
-                "",
-                "KEEP UNCHANGED (must explicitly list):",
-                "- Random seed: [specify value, e.g., 42]",
-                "- Data split: [must be identical to parent]",
-                "- Successful elements from trajectory: [list what worked and should be preserved]",
-                "```",
-                "",
-                "⚠️ Plans that do not follow this structure will be considered invalid.",
-                "",
-                "---",
-                "",
-                "**Guidelines on Learning from Trajectory**:",
-                "",
-                "- **Identify patterns**: Look for what worked (e.g., \"Step 2→3: augmentation +5%\") and what didn't",
-                "- **Build on success**: If technique X improved performance, consider enhancing it further",
-                "- **Avoid repeated failures**: If approach Y failed multiple times, try a different direction",
-                "- **Extract root causes**: Why did certain changes work? Apply that understanding to new changes",
-                "",
-                "⚠️ **Key Principle**: Evolution means learning from history, not random mutation.",
-                "Use trajectory evidence to guide your changes, not gut feeling.",
-                "",
-                "---",
-                "",
-                "⚠️ This structured format enables proper performance tracking and knowledge accumulation.",
-                "Your reasoning should clearly show how you learned from the evolution trajectory.",
+                "Choose one specific change supported by a successful or failed pattern in the branch trajectory.",
+                "Preserve successful elements, the evaluator, output contract, data split, and unrelated working interfaces while changing the evidenced bottleneck.",
+                "Keep the visible plan to 1-3 information-dense sentences and follow the active JSON, diff, or plan-plus-code response contract; do not add a separate fenced plan template.",
             ],
         }
 
@@ -199,12 +150,12 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         memory_section = f"\n# Memory\nBelow is a record of previous improvement attempts and their outcomes:\n {prompt['Memory']}\n"
 
     user_prompt = (
-        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{task_section(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"{instructions}{memory_section}{prompt['Branch Evolution History']}"
     )
     assistant_prefix = (
         "Let me approach this systematically.\n"
-        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"{dataset_reference_sentence(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"The current solution uses the following code:\n{prompt['Previous solution']['Code']}\n"
         f"Its output was:\n{output}\n"
         "Building on this and my evolution trajectory, I'll develop an improved approach."
@@ -216,7 +167,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff evolution for node {parent_node.id}")
-            plan, code = _diff_evolution(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_evolution(agent, prompt, routed_data_context(agent, "merge"), parent_node)
         except Exception as e:
             logger.warning(f"Diff evolution failed: {e}, falling back to full evolution")
             plan, code = plan_and_code_query(agent, prompt_complete)

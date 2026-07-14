@@ -1,6 +1,5 @@
 """SearchNode: solution tree node (code, execution, evaluation, search metadata)."""
 
-import copy
 import difflib
 import json
 import logging
@@ -63,7 +62,11 @@ class SearchNode(DataClassJsonMixin):
     continue_improve: bool = field(default=False, kw_only=True)
     improve_failure_depth: int = field(default=0, kw_only=True)
     lock: bool = field(default=False, kw_only=True)
-    child_count_lock: bool = threading.Lock()
+    child_count_lock: object = field(
+        default_factory=threading.Lock,
+        repr=False,
+        compare=False,
+    )
     expected_child_count: int = field(default=0, kw_only=True)
     finish_time: str = field(default=None, kw_only=True)
     created_time: str = field(default=None, kw_only=True)
@@ -515,12 +518,13 @@ def get_longest_path(journal: Journal) -> list[str]:
 
 
 def filter_on_path(journal: Journal, path: list[str]) -> Journal:
-    journal_copy = copy.deepcopy(journal)
-    journal_copy.nodes = [n for n in journal_copy.nodes if n.id in path]
-    for n in journal_copy.nodes:
-        n._term_out = "<OMITTED>"
-        n.exc_stack = "<OMITTED>"
-    return journal_copy
+    from engine.journal_snapshot import JournalSnapshot
+
+    return JournalSnapshot.from_journal(
+        journal,
+        node_ids=path,
+        omit_execution_details=True,
+    ).to_journal()
 
 
 def filter_for_best_path(journal: Journal, best_node: str) -> Journal:

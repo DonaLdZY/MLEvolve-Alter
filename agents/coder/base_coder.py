@@ -11,7 +11,8 @@ import logging
 from typing import Tuple
 
 from llm import generate
-from utils.response import extract_code, extract_text_up_to_code
+from utils.response import extract_plan_and_code
+from agents.prompts import plan_and_code_response_format
 
 logger = logging.getLogger("MLEvolve")
 
@@ -19,10 +20,8 @@ logger = logging.getLogger("MLEvolve")
 # ============ Response format prompt (rewrite mode specific) ============
 
 RESPONSE_FORMAT = {
-    "Response format": (
-        "Your response should be a brief outline/sketch of your proposed solution in natural language, "
-        "followed by a single markdown code block (wrapped in ```) which implements this solution and prints out the evaluation metric. "
-        "There should be no additional headings or text in your response. Just natural language text followed by a newline and then the markdown code block. "
+    "Response format": plan_and_code_response_format(
+        "the complete runnable solution, including the required validation metric output"
     )
 }
 
@@ -33,6 +32,11 @@ def plan_and_code_query(
     retries: int = 3,
 ) -> Tuple[str, str]:
     """Generate plan + code in one LLM call; returns (nl_text, code). On failure returns ("", raw_completion_text)."""
+    retry_cfg = getattr(agent_instance.acfg, "retries", None)
+    retries = max(
+        1,
+        int(getattr(retry_cfg, "code_generation_extract_max_attempts", retries)),
+    )
     completion_text = None
     for _ in range(retries):
         completion_text = generate(
@@ -40,10 +44,14 @@ def plan_and_code_query(
             temperature=agent_instance.acfg.code.temp,
             cfg=agent_instance.cfg,
         )
-        code = extract_code(completion_text)
-        nl_text = extract_text_up_to_code(completion_text)
+        nl_text, code = extract_plan_and_code(
+            completion_text,
+            default_plan="Implement the requested complete solution and report its validation metric.",
+        )
 
-        if code and nl_text:
+        if code:
+            if completion_text.lstrip().startswith("```"):
+                logger.info("Accepted a valid code-first response without regenerating it.")
             return nl_text, code
 
         logger.debug("Extraction retry...")

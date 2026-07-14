@@ -70,6 +70,21 @@ def extract_text_up_to_code(s):
     return s[: s.find("```")].strip()
 
 
+def extract_plan_and_code(text: str, default_plan: str) -> tuple[str, str]:
+    """Extract valid Python code while treating the prose plan as optional.
+
+    Prompts request a short plan for readability, but a response that starts
+    directly with a valid Python fence is still a complete coding result and
+    must not trigger an expensive full-generation retry.
+    """
+
+    code = extract_code(text or "")
+    if not code:
+        return "", ""
+    plan = extract_text_up_to_code(text or "").strip() or default_plan.strip()
+    return plan, code
+
+
 def extract_plan_from_diff_response(text: str) -> str:
     if not text:
         return ""

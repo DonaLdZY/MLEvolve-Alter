@@ -995,8 +995,8 @@ def health() -> dict[str, str]:
 
 
 @app.get("/resources/inventory")
-def resource_inventory() -> dict[str, Any]:
-    return detect_resource_inventory()
+def resource_inventory(python_executable: str = "") -> dict[str, Any]:
+    return detect_resource_inventory(python_executable or None)
 
 
 @app.post("/jobs/start")
@@ -1013,7 +1013,7 @@ def start_job(req: StartMLEvolveRequest) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if resources.accelerator_mode == "selected":
-        inventory = detect_resource_inventory()
+        inventory = detect_resource_inventory(req.python_executable)
         selection_errors = validate_accelerator_selection(
             resources.accelerator_mode,
             resources.accelerator_device_ids,

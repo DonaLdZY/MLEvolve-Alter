@@ -114,3 +114,56 @@ def test_complete_automl_context_pack_is_prompt_ready(tmp_path: Path) -> None:
     assert "Build deterministic baseline first" in text
     assert "Data Access" in text
     assert "final_validation_score" in text
+
+
+def test_stage_context_routes_complete_sections_without_character_truncation() -> None:
+    text = """## AutoRealize Structured Context
+Stable introduction.
+
+## Priority Rules
+- authoritative
+
+## Exact Source Schema Contract
+- physical_columns_exact: `exact_field`
+
+## Minimal Task Reference
+- problem_paradigm: `static_optimization`
+
+## Method Strategy
+- use task-appropriate methods
+
+## Evaluation Contract Reference
+- metric_direction: minimize
+
+## Output Contract Reference
+- output_filename: submission.csv
+
+## Supplemental Data Facts
+- very verbose table profile
+
+## Constraints Reference
+- obey task constraints
+
+## Leakage Guards
+- no leakage
+
+## Pitfalls
+- avoid guessed fields
+"""
+
+    data_context = _CTX.select_autorealize_context_for_stage(
+        text, "data_processing_and_feature_engineering"
+    )
+    model_context = _CTX.select_autorealize_context_for_stage(text, "model_design")
+    training_context = _CTX.select_autorealize_context_for_stage(text, "training_evaluation")
+    evaluator_context = _CTX.select_autorealize_context_for_stage(
+        text, "evaluator_and_constraint_checker"
+    )
+
+    assert "very verbose table profile" in data_context
+    assert "very verbose table profile" not in model_context
+    assert "very verbose table profile" not in training_context
+    assert "physical_columns_exact: `exact_field`" in evaluator_context
+    assert "metric_direction: minimize" in model_context
+    assert "output_filename: submission.csv" in training_context
+    assert _CTX.select_autorealize_context_for_stage("plain preview", "model_design") == "plain preview"

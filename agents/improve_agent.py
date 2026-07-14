@@ -19,12 +19,13 @@ from agents.prompts import (
 from agents.planner import run_planner, generate_initial_plan, refine_plan_to_json, build_planner_task, build_planner_suffix, build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
-from agents.prompt_cache import dataset_reference_sentence, task_section
+from agents.prompt_cache import dataset_reference_sentence, routed_data_context, task_section
 
 logger = logging.getLogger("MLEvolve")
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:
+    data_context = routed_data_context(agent, "merge")
     optimization_or_rl = is_optimization_or_rl_task(
         task_desc=getattr(agent, "task_desc", ""),
         coldstart_description=getattr(agent, "coldstart_description", ""),
@@ -122,82 +123,9 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     else:
         prompt["Instructions"] |= {
             "🔬 Critical: Scientific Approach to Optimization": [
-                "",
-                "⚠️ **MANDATORY FORMAT REQUIREMENT**",
-                "You MUST structure your plan using the following EXACT format:",
-                "",
-                "CHANGES (list ALL modifications, one or multiple):",
-                "",
-                "Change #1: [Category: Data Augmentation / Model Architecture / Loss Function / Optimization / Regularization / Training Strategy]",
-                "- What: [Describe the SPECIFIC technical modification you will make]",
-                "- Why: [Explain why THIS TASK needs this specific change]",
-                "",
-                "Change #2 (if applicable): [Category]",
-                "- What: [Describe the SPECIFIC technical modification]",
-                "- Why: [Explain why THIS TASK needs this specific change]",
-                "",
-                "[Add more changes if needed, but keep them focused and related]",
-                "",
-                "---",
-                "",
-                "WHY current solution limited:",
-                "- Root cause: [Specific analysis, not just 'low performance']",
-                "- Evidence: [Data/observation that supports your diagnosis]",
-                "",
-                "HOW these changes address it:",
-                "- Mechanism: [Theoretical justification of WHY this should work]",
-                "- Expected improvement: [Concrete prediction]",
-                "- Synergy (if multiple changes): [How changes work together, if applicable]",
-                "",
-                "KEEP UNCHANGED (must explicitly list):",
-                "- Random seed: [specify value, e.g., 42]",
-                "- Data split: [must be identical to parent]",
-                "- [List other key components that remain unchanged]",
-                "",
-                "⚠️ Plans that do not follow this structure will be considered invalid.",
-                "",
-                "---",
-                "",
-                "**Guidelines on Number of Changes**:",
-                "",
-                "- **Single change (Recommended for most cases)**: Best for establishing clear causality",
-                "  Example: \"Add [specific augmentation technique]\" → easy to attribute performance change",
-                "",
-                "- **Multiple related changes (Acceptable)**: When changes naturally work together",
-                "  Example: \"Change model architecture + adjust corresponding hyperparameters\"",
-                "  (architecture changes often require optimizer/lr adjustments)",
-                "",
-                "- **Fusion scenario (Acceptable)**: Combining proven improvements from Memory",
-                "  Example: \"Integrate [technique from Attempt #X] + [technique from Attempt #Y]\"",
-                "  (both already validated separately in Memory)",
-                "",
-                "⚠️ **Key Principle**: Whether single or multiple changes, you MUST:",
-                "1. Clearly list each specific change",
-                "2. Explain the rationale for each",
-                "3. Specify what stays the same for proper baseline comparison",
-                "",
-                "---",
-                "",
-                "**Explanation of Requirements**:",
-                "",
-                "1. **WHY is the current solution limited?**",
-                "   - Not just 'performance is low' - what is the ROOT CAUSE?",
-                "   - What EVIDENCE supports your diagnosis?",
-                "",
-                "2. **HOW will your changes address this root cause?**",
-                "   - Not just 'try method X' - explain the MECHANISM",
-                "   - Why should this work? What is the theoretical justification?",
-                "",
-                "3. **WHAT will you change, and what will stay the same?**",
-                "   - List ALL changes explicitly (even if multiple)",
-                "   - Keep other things identical for proper baseline comparison",
-                "   - This enables understanding WHAT led to performance changes",
-                "",
-                "---",
-                "",
-                "⚠️ This structured format enables proper performance tracking and knowledge accumulation.",
-                "Random trial-and-error without clear documentation is not acceptable.",
-                "Others will learn from your reasoning and can replicate your improvements.",
+                "Choose one specific change supported by the parent node's metric, parser diagnostics, execution output, or memory evidence.",
+                "Explain internally why that change addresses the observed bottleneck and preserve the evaluator, output contract, data split, and unrelated working interfaces.",
+                "Keep the visible plan to 1-3 information-dense sentences and follow the active JSON, diff, or plan-plus-code response contract; do not add a separate plan template.",
             ],
         }
 
@@ -220,7 +148,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             "- This is valid when current architecture is fundamentally unsuitable for this task",
             "- But ask yourself: Could I improve the current approach by adding/modifying instead of replacing?",
             "",
-            "- Your plan should be concise but comprehensive: Must address WHY/HOW/WHAT (2-4 sentences each). Avoid verbosity - every sentence should add new insight. Natural length: around 8-12 sentences for a complete reasoning process.\n",
+            "- Keep the visible plan to 1-3 information-dense sentences covering the specific change, evidence from the parent node, and the expected effect. Do detailed reasoning internally.\n",
             "- Don't suggest to do EDA.\n",
         ],
     }
@@ -255,10 +183,10 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if prompt.get("Memory", "").strip():
         memory_section = f"\n# Memory\nBelow is a record of previous improvement attempts and their outcomes:\n {prompt['Memory']}\n"
 
-    user_prompt = f"{task_section(prompt['Task description'], agent.data_preview)}\n{instructions}{memory_section}"
+    user_prompt = f"{task_section(prompt['Task description'], data_context)}\n{instructions}{memory_section}"
     assistant_prefix = (
         "Let me approach this systematically.\n"
-        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"{dataset_reference_sentence(prompt['Task description'], data_context)}\n"
         f"The current solution uses the following code:\n{prompt['Previous solution']['Code']}\n"
         f"Its output was:\n{output}\n"
         "Building on this, I'll develop an improved approach."
@@ -270,7 +198,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff improve for node {parent_node.id}")
-            plan, code = _diff_improve(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_improve(agent, prompt, data_context, parent_node)
         except Exception as e:
             logger.warning(f"Diff improve failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)

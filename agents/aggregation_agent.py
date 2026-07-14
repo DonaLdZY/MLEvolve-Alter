@@ -6,7 +6,7 @@ from engine.search_node import SearchNode
 from agents.prompts import prompt_resp_fmt, get_impl_guideline_from_agent
 from agents.planner import build_chat_prompt_for_model
 from agents.coder import plan_and_code_query
-from agents.prompt_cache import dataset_reference_sentence, task_section
+from agents.prompt_cache import dataset_reference_sentence, routed_data_context, task_section
 
 from engine.conditions import should_trigger_branch_fusion  # noqa: F401
 from agents.triggers import register_node
@@ -157,7 +157,7 @@ def run(
     instructions = "\n# Instructions\n\n"
     instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
-    data_preview = getattr(agent, "data_preview", "") or ""
+    data_preview = routed_data_context(agent, "merge")
     assistant_prefix = (
         "Let me approach this systematically.\n"
         f"{dataset_reference_sentence(prompt['Task description'], data_preview)}\n"

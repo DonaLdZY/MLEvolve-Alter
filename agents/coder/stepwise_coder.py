@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any
 
 from llm import generate, compile_prompt_to_md
-from utils.response import extract_code, extract_text_up_to_code, wrap_code
-from agents.prompts import is_optimization_or_rl_task
+from utils.response import extract_plan_and_code, wrap_code
+from utils.autorealize_context import select_autorealize_context_for_stage
+from agents.prompts import is_optimization_or_rl_task, plan_and_code_response_format
 from agents.prompt_cache import dataset_reference_sentence, task_section
 
 logger = logging.getLogger("MLEvolve")
@@ -62,6 +63,11 @@ class StepAgent:
         previous_module_code: str = "",
         improvement_strategy: str = "",
     ) -> Tuple[str, str]:
+        retry_cfg = getattr(agent_instance.acfg, "retries", None)
+        retries = max(
+            1,
+            int(getattr(retry_cfg, "code_generation_extract_max_attempts", retries)),
+        )
         prompt = self._build_prompt(
             task_desc=task_desc,
             data_preview_str=data_preview,
@@ -81,10 +87,14 @@ class StepAgent:
                 temperature=agent_instance.acfg.code.temp,
                 cfg=agent_instance.cfg
             )
-            code = extract_code(completion_text)
-            nl_text = extract_text_up_to_code(completion_text)
+            nl_text, code = extract_plan_and_code(
+                completion_text,
+                default_plan=f"Implement only the {self.name} stage.",
+            )
 
-            if code and nl_text:
+            if code:
+                if completion_text.lstrip().startswith("```"):
+                    logger.info("Accepted a valid code-first response for %s.", self.name)
                 return nl_text, code
 
             logger.debug(f"Extraction retry for {self.name}...")
@@ -176,11 +186,8 @@ class StepAgent:
 
         prompt_instructions = prompt_base["Instructions"].copy()
 
-        prompt_instructions["Response format"] = (
-            "Your response should be:\n"
-            "1. A brief plan (2-3 sentences) describing what you will do in this step\n"
-            "2. A single markdown code block (wrapped in ```) containing ONLY the code for this step\n"
-            "IMPORTANT: Do NOT write code for other steps. Only write code for the current step."
+        prompt_instructions["Response format"] = plan_and_code_response_format(
+            f"code for the current `{self.name}` stage; do not implement other stages"
         )
 
         prompt_instructions[f"{self.name} guidelines"] = [guidelines_text]
@@ -198,10 +205,24 @@ class StepAgent:
             else:
                 prompt_instructions["Implementation guideline"] = [base_impl_guideline] + step_specific_impl
 
+        route_context = bool(
+            getattr(getattr(agent_instance.acfg, "draft", None), "stepwise_stage_context", True)
+        )
+        stage_data_preview = (
+            select_autorealize_context_for_stage(data_preview_str, self.name)
+            if route_context
+            else data_preview_str
+        )
+        logger.info(
+            "Stepwise context route %s: %s -> %s chars",
+            self.name,
+            len(data_preview_str or ""),
+            len(stage_data_preview or ""),
+        )
         prompt: Dict[str, Any] = {
             "Introduction": introduction,
             "Task description": task_desc,
-            "Data preview": data_preview_str,
+            "Data preview": stage_data_preview,
             "Memory": prompt_base.get("Memory", context.memory if context.memory else ""),
             "Previous steps": prev_summary,
             "Current step": {
@@ -313,8 +334,10 @@ class MetaAgent:
                 temperature=agent_instance.acfg.code.temp,
                 cfg=agent_instance.cfg
             )
-            code = extract_code(completion_text)
-            nl_text = extract_text_up_to_code(completion_text)
+            nl_text, code = extract_plan_and_code(
+                completion_text,
+                default_plan="Merge the generated stages into one runnable solution.",
+            )
 
             if code:
                 return nl_text or "Merged code from stepwise agents.", code
@@ -357,10 +380,8 @@ class MetaAgent:
 
         prompt_instructions = prompt_base["Instructions"].copy()
 
-        prompt_instructions["Response format"] = (
-            "Your response should be a brief summary (2-3 sentences) of how you merged the steps, "
-            "followed by a single markdown code block (wrapped in ```) containing the complete merged code. "
-            "There should be no additional headings or text in your response."
+        prompt_instructions["Response format"] = plan_and_code_response_format(
+            "the complete merged runnable solution"
         )
 
         optimization_rl = _optimization_rl_enabled(agent_instance, task_desc)
@@ -400,11 +421,24 @@ class MetaAgent:
             "- All parts must work together seamlessly",
         ]
 
+        route_context = bool(
+            getattr(getattr(agent_instance.acfg, "draft", None), "stepwise_stage_context", True)
+        )
+        merge_data_preview = (
+            select_autorealize_context_for_stage(data_preview_str, "merge")
+            if route_context
+            else data_preview_str
+        )
+        logger.info(
+            "Stepwise context route merge: %s -> %s chars",
+            len(data_preview_str or ""),
+            len(merge_data_preview or ""),
+        )
         prompt: Dict[str, Any] = {
             "Introduction": introduction,
             "Task description": task_desc,
             "Memory": prompt_base.get("Memory", context.memory if context.memory else ""),
-            "Data preview": data_preview_str,
+            "Data preview": merge_data_preview,
             "Step results": "".join(steps_summary),
             "Instructions": prompt_instructions,
         }

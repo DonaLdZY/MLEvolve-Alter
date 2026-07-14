@@ -1,6 +1,7 @@
 """Build guidance description for agent from task/model JSON."""
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Any
 
@@ -22,6 +23,31 @@ Rules:
 - "Others": tabular prediction, time series forecasting, graph learning, video, molecular, signal processing, recommendation, or anything not fitting above and not primarily an optimization/decision task
 
 You MUST call the classify function with your answer."""
+
+
+def _authoritative_category(cfg: Any, task_desc: str) -> str | None:
+    """Read an explicit AutoRealize paradigm before asking a classifier LLM."""
+
+    texts = [str(task_desc or "")]
+    try:
+        from utils.autorealize_context import build_autorealize_context_md
+
+        raw_data_dir = getattr(cfg, "data_dir", "")
+        if raw_data_dir:
+            data_dir = Path(raw_data_dir)
+            texts.append(
+                build_autorealize_context_md(data_dir, write_context_file=False)
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Could not inspect AutoRealize paradigm for cold start: %s", exc)
+
+    text = "\n".join(texts)
+    match = re.search(
+        r"(?im)^\s*[-*]?\s*(?:problem[ _]paradigm|Problem paradigm)\s*:\s*`?"
+        r"(static_optimization|reinforcement_learning)\b",
+        text,
+    )
+    return "Optimization" if match else None
 
 
 def _load_json(path: str) -> Dict:
@@ -167,7 +193,15 @@ def build_guidance_description(cfg: Any, task_desc: str = "") -> str:
 
     tasks = _load_json(cfg.coldstart.task_json_path)
     models = _load_json(cfg.coldstart.model_json_path)
-    if cfg.exp_id in tasks:
+    authoritative_category = _authoritative_category(cfg, task_desc)
+    if authoritative_category:
+        category = authoritative_category
+        logger.info(
+            "Cold-start category loaded directly from AutoRealize context: %s",
+            category,
+        )
+        text = _build_guidance_text_from_models(collect_models_for_category(category, models))
+    elif cfg.exp_id in tasks:
         category = tasks[cfg.exp_id]
         logger.info("Cold-start matched exp_id=%s to category=%s", cfg.exp_id, category)
         if category == "Others" and task_desc:

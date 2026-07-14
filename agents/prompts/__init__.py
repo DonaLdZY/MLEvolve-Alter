@@ -6,6 +6,7 @@ from .shared import (
     get_optimization_rl_strategy,
     prompt_leakage_prevention,
     prompt_resp_fmt,
+    plan_and_code_response_format,
     get_internet_clarification,
     is_optimization_or_rl_task,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "get_optimization_rl_strategy",
     "prompt_leakage_prevention",
     "prompt_resp_fmt",
+    "plan_and_code_response_format",
     "get_internet_clarification",
     "is_optimization_or_rl_task",
     "get_prompt_environment",

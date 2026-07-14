@@ -14,11 +14,12 @@ import shutup
 from rich.logging import RichHandler
 import logging
 
-# Lazy import to avoid circular dependency with engine.search_node
-# Journal and filter_journal are imported where needed via _get_journal_classes()
+# Lazy import to avoid circular dependencies while configuration is imported.
 def _get_journal_classes():
-    from engine.search_node import Journal, filter_journal
-    return Journal, filter_journal
+    from engine.journal_snapshot import JournalSnapshot
+    from engine.search_node import Journal, get_longest_path, get_path_to_node
+
+    return Journal, JournalSnapshot, get_longest_path, get_path_to_node
 
 from utils import copytree, preproc_data, serialize
 
@@ -57,14 +58,19 @@ class DraftConfig:
     optimization_initial_drafts_cap: int = 1
     show_pending_draft_nodes: bool = True
     submission_stagger_seconds: float = 10.0
+    stepwise_stage_context: bool = True
 
 
 @dataclass
 class RetryConfig:
     """Agent-level structured-output and review retry policy."""
 
-    code_review_max_attempts: int = 3
+    code_review_max_attempts: int = 2
     code_review_delay_seconds: float = 5.0
+    code_review_model_role: str = "feedback"
+    code_review_escalate_to_code: bool = True
+    code_generation_extract_max_attempts: int = 2
+    human_insight_async: bool = True
     metric_direction_max_attempts: int = 3
     metric_direction_delay_seconds: float = 1.0
     result_parse_max_attempts: int = 3
@@ -451,16 +457,29 @@ def prep_agent_workspace(cfg: Config):
 
 
 def save_run(cfg: Config, journal):
-    Journal, filter_journal = _get_journal_classes()
+    Journal, JournalSnapshot, get_longest_path, get_path_to_node = _get_journal_classes()
     cfg.log_dir.mkdir(parents=True, exist_ok=True)
 
-    filtered_journal = filter_journal(journal)
-    # save journal
     runtime_cfg = getattr(cfg, "runtime", None)
     if bool(getattr(runtime_cfg, "save_journal", True)):
-        serialize.dump_json(journal, cfg.log_dir / "journal.json")
+        serialize.dump_json(
+            JournalSnapshot.from_journal(journal),
+            cfg.log_dir / "journal.json",
+        )
     if bool(getattr(runtime_cfg, "save_filtered_journal", True)):
-        serialize.dump_json(filtered_journal, cfg.log_dir / "filtered_journal.json")
+        best_for_path = journal.get_best_node(only_good=True)
+        if best_for_path is not None:
+            filtered_path = get_path_to_node(journal, best_for_path.id)
+        else:
+            filtered_path = get_longest_path(journal)
+        serialize.dump_json(
+            JournalSnapshot.from_journal(
+                journal,
+                node_ids=filtered_path,
+                omit_execution_details=True,
+            ),
+            cfg.log_dir / "filtered_journal.json",
+        )
     # save config
     if bool(getattr(runtime_cfg, "save_resolved_config", True)):
         OmegaConf.save(config=_redacted_cfg(cfg), f=cfg.log_dir / "config.yaml")

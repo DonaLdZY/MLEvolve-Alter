@@ -156,16 +156,23 @@ def test_resource_inventory_endpoint_returns_detected_inventory(monkeypatch) -> 
         "devices": [],
         "torch": {"version": "test"},
     }
-    monkeypatch.setattr(service_api, "detect_resource_inventory", lambda: expected)
+    captured: dict[str, object] = {}
 
-    assert service_api.resource_inventory() == expected
+    def fake_detect(python_executable=None):
+        captured["python_executable"] = python_executable
+        return expected
+
+    monkeypatch.setattr(service_api, "detect_resource_inventory", fake_detect)
+
+    assert service_api.resource_inventory("/configured/python") == expected
+    assert captured["python_executable"] == "/configured/python"
 
 
 def test_start_job_rejects_unknown_selected_accelerator(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         service_api,
         "detect_resource_inventory",
-        lambda: {
+        lambda _python_executable=None: {
             "cpu": {"available_ids": [0, 1]},
             "memory": {"total_bytes": 8 * 1024**3, "total_gb": 8.0},
             "devices": [{"id": "cuda:0", "visibility_supported": True}],
@@ -186,6 +193,29 @@ def test_start_job_rejects_unknown_selected_accelerator(tmp_path: Path, monkeypa
 
     with pytest.raises(HTTPException, match="accelerator device is not present"):
         service_api.start_job(request)
+
+
+def test_inventory_uses_configured_python_for_torch_probe(monkeypatch) -> None:
+    expected = {
+        "version": "configured-torch",
+        "cuda_available": True,
+        "cuda_count": 1,
+        "hip_version": "",
+        "xpu_available": False,
+        "xpu_count": 0,
+        "mps_available": False,
+        "python_executable": "/configured/python",
+        "probe_source": "configured_python",
+        "cuda_devices": [],
+    }
+    monkeypatch.setattr("utils.resource_limits._configured_torch_runtime_info", lambda value: expected)
+    monkeypatch.setattr("utils.resource_limits._run_command", lambda *_args, **_kwargs: "0, RTX Demo, GPU-demo, 16384")
+
+    inventory = detect_resource_inventory("/configured/python")
+
+    assert inventory["torch"]["version"] == "configured-torch"
+    assert inventory["torch"]["python_executable"] == "/configured/python"
+    assert inventory["devices"][0]["runtime_available"] is True
 
 
 def test_service_resource_request_reads_task_yaml(tmp_path: Path) -> None:

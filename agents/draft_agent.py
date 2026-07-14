@@ -126,7 +126,7 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
             "  • **Forbidden**: Minor variations (changing hyperparameters, swapping similar models, tweaking preprocessing).\n",
             "  • **Think**: 'Does my approach explore a fundamentally different hypothesis?' If NO → redesign.\n",
             "- Don't propose the same modelling solution but keep the evaluation the same.\n",
-            "- Your plan should be concise but comprehensive: Must address WHAT/WHY/HOW (2-4 sentences each). Avoid verbosity - every sentence should add new insight. Natural length: around 8-12 sentences for a complete reasoning process.\n",
+            "- Keep the visible plan to 1-3 information-dense sentences covering WHAT changes, WHY they fit this task, and HOW validation will confirm them. Do the detailed reasoning internally.\n",
             "- Use the task description / AutoRealize context evaluation metric exactly. Do not invent a separate metric; if the metric is incomplete, implement the most conservative supported scalar and make the assumption explicit.\n",
             "- Don't suggest to do EDA.\n",
             "- The data is already prepared in `./input` directory. No need to unzip files.\n",

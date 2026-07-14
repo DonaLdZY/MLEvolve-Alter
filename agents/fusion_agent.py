@@ -13,7 +13,7 @@ from agents.coder import plan_and_code_query
 from agents.coder.diff_coder import diff_generate_and_apply
 from engine import solution_manager
 from agents.triggers import register_node
-from agents.prompt_cache import dataset_reference_sentence, task_section
+from agents.prompt_cache import dataset_reference_sentence, routed_data_context, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -60,58 +60,9 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
 
     prompt["Instructions"] |= {
         "🔬 Critical: Scientific Approach to Fusion": [
-            "",
-            "⚠️ **MANDATORY FORMAT REQUIREMENT**",
-            "You MUST structure your plan using the following EXACT format:",
-            "",
-            "```",
-            "CHANGES (list ALL modifications, one or multiple):",
-            "",
-            "Change #1: [Category: Data Augmentation / Model Architecture / Loss Function / Optimization / Regularization / Training Strategy]",
-            "- What: [Describe the SPECIFIC technique you will incorporate from reference]",
-            "- Why: [Based on reference analysis, explain why THIS TASK needs this specific change]",
-            "",
-            "Change #2 (if applicable): [Category]",
-            "- What: [Describe the SPECIFIC technique]",
-            "- Why: [Based on reference analysis, explain why THIS TASK needs this specific change]",
-            "",
-            "[Add more changes if needed, but keep them focused and related]",
-            "",
-            "---",
-            "",
-            "WHY current solution limited (and reference succeeded):",
-            "- Root cause: [What limitation does your solution have that reference addressed?]",
-            "- Evidence: [Specific comparison showing reference's advantage]",
-            "",
-            "HOW reference techniques apply to MY solution:",
-            "- Mechanism: [Why should their technique work in your context?]",
-            "- Compatibility: [How does it fit with your existing architecture?]",
-            "- Expected improvement: [Concrete prediction based on reference's success]",
-            "",
-            "KEEP UNCHANGED (must explicitly list):",
-            "- Random seed: [specify value, e.g., 42]",
-            "- Data split: [must be identical to parent]",
-            "- Core architecture: [your base model/framework that stays intact]",
-            "```",
-            "",
-            "⚠️ Plans that do not follow this structure will be considered invalid.",
-            "",
-            "---",
-            "",
-            "**Guidelines on Reference-Based Fusion**:",
-            "",
-            "- **Selective adoption**: Don't copy everything - choose techniques that address YOUR limitations",
-            "- **Understand mechanisms**: Why did it work for them? Will it work for you?",
-            "- **Preserve your strengths**: Keep what's working in your solution",
-            "- **Avoid blind combination**: Fusion ≠ pasting their code into yours",
-            "",
-            "⚠️ **Key Principle**: Fusion means understanding WHY techniques work, not blindly copying.",
-            "Reference solutions provide ideas, not templates to copy.",
-            "",
-            "---",
-            "",
-            "⚠️ This structured format enables proper performance tracking and knowledge accumulation.",
-            "Your reasoning should clearly show how you analyzed the reference and adapted it.",
+            "Select one concrete technique from the reference solution that addresses an evidenced limitation of the current node.",
+            "Preserve the official evaluator, output contract, data split, reusable interfaces, and working parts unless the evidence shows they are the defect.",
+            "Keep the visible plan to 1-3 information-dense sentences: identify the change, why it transfers, and what remains unchanged. Do not add a separate fenced plan template.",
         ],
     }
 
@@ -135,12 +86,12 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
     instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
     user_prompt = (
-        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{task_section(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"{instructions}\n# Reference Solution\n{prompt['Reference Solution']}"
     )
     assistant_prefix = (
         "Let me approach this systematically.\n"
-        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"{dataset_reference_sentence(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"My current solution:\nPlan: {prompt['Current Solution']['Plan']}\n"
         f"Code: {prompt['Current Solution']['Code']}\n"
         f"Performance: {prompt['Current Solution']['Performance']}\n"
@@ -152,7 +103,7 @@ def fuse_two_nodes(agent, source_node: SearchNode, target_node: SearchNode) -> S
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff fusion for node {source_node.id} with reference {target_node.id}")
-            plan, code = _diff_fusion(agent, prompt, agent.data_preview, source_node)
+            plan, code = _diff_fusion(agent, prompt, routed_data_context(agent, "merge"), source_node)
         except Exception as e:
             logger.warning(f"Diff fusion failed: {e}, falling back to full fusion")
             plan, code = plan_and_code_query(agent, prompt_complete)
@@ -210,61 +161,9 @@ def _fuse_with_multiple_references(
 
     prompt["Instructions"] |= {
         "🔬 Critical: Scientific Approach to Multi-Reference Fusion": [
-            "",
-            "⚠️ **MANDATORY FORMAT REQUIREMENT**",
-            "You MUST structure your plan using the following EXACT format:",
-            "",
-            "```",
-            "CHANGES (list ALL modifications, one or multiple):",
-            "",
-            "Change #1: [Category: Data Augmentation / Model Architecture / Loss Function / Optimization / Regularization / Training Strategy]",
-            "- What: [Describe the SPECIFIC technique from references you will incorporate]",
-            "- Why: [Based on multi-reference analysis, explain why THIS TASK needs this specific change]",
-            "- Source: [Which reference(s) inspired this change]",
-            "",
-            "Change #2 (if applicable): [Category]",
-            "- What: [Describe the SPECIFIC technique]",
-            "- Why: [Based on multi-reference analysis, explain why THIS TASK needs this specific change]",
-            "- Source: [Which reference(s) inspired this change]",
-            "",
-            "[Add more changes if needed, but keep them focused and related]",
-            "",
-            "---",
-            "",
-            "WHY current solution limited (and which reference addressed it best):",
-            "- Root cause: [What limitation does your solution have?]",
-            "- Evidence: [Comparison across references showing which approach works best]",
-            "- Best reference: [Which reference most effectively addressed this limitation]",
-            "",
-            "HOW selected techniques apply to MY solution:",
-            "- Mechanism: [Why should this technique work in your context?]",
-            "- Compatibility: [How does it fit with your existing architecture?]",
-            "- Expected improvement: [Concrete prediction based on references' success]",
-            "",
-            "KEEP UNCHANGED (must explicitly list):",
-            "- Random seed: [specify value, e.g., 42]",
-            "- Data split: [must be identical to parent]",
-            "- Core architecture: [your base model/framework that stays intact]",
-            "```",
-            "",
-            "⚠️ Plans that do not follow this structure will be considered invalid.",
-            "",
-            "---",
-            "",
-            "**Guidelines on Multi-Reference Fusion**:",
-            "",
-            "- **Comparative analysis**: Why did different references succeed? Which approach is most relevant?",
-            "- **Best technique selection**: More references → better choice, not more techniques to combine",
-            "- **Avoid feature combination**: Don't try to use techniques from all references",
-            "- **Focus on YOUR needs**: Which reference best addresses YOUR specific limitation?",
-            "",
-            "⚠️ **Key Principle**: More references means better understanding of which ONE technique to adopt.",
-            "Synthesize knowledge to make the best choice, don't combine everything.",
-            "",
-            "---",
-            "",
-            "⚠️ This structured format enables proper performance tracking and knowledge accumulation.",
-            "Your reasoning should clearly show how you compared references and chose the best approach.",
+            "Compare references and select one concrete technique from the most relevant source for an evidenced limitation of the current node.",
+            "Preserve the official evaluator, output contract, data split, reusable interfaces, and working parts unless the evidence shows they are the defect.",
+            "Keep the visible plan to 1-3 information-dense sentences: identify the selected source and change, why it transfers, and what remains unchanged. Do not add a separate fenced plan template.",
         ],
     }
 
@@ -288,12 +187,12 @@ def _fuse_with_multiple_references(
     instructions += compile_prompt_to_md(prompt["Instructions"], 2)
 
     user_prompt = (
-        f"{task_section(prompt['Task description'], agent.data_preview)}\n"
+        f"{task_section(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"{instructions}\n# Reference Solutions\n{prompt['Reference Solutions']}"
     )
     assistant_prefix = (
         "Let me approach this systematically.\n"
-        f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+        f"{dataset_reference_sentence(prompt['Task description'], routed_data_context(agent, 'merge'))}\n"
         f"My current solution:\nPlan: {prompt['Current Solution']['Plan']}\n"
         f"Code: {prompt['Current Solution']['Code']}\n"
         f"Performance: {prompt['Current Solution']['Performance']}\n"
@@ -305,7 +204,7 @@ def _fuse_with_multiple_references(
     if agent.acfg.use_diff_mode:
         try:
             logger.info(f"Using diff multi-fusion for node {parent_node.id} with {len(reference_nodes)} references")
-            plan, code = _diff_multi_fusion(agent, prompt, agent.data_preview, parent_node)
+            plan, code = _diff_multi_fusion(agent, prompt, routed_data_context(agent, "merge"), parent_node)
         except Exception as e:
             logger.warning(f"Diff multi-fusion failed: {e}, falling back to full rewrite")
             plan, code = plan_and_code_query(agent, prompt_complete)

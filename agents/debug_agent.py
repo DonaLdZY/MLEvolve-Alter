@@ -15,7 +15,7 @@ from agents.prompts import (
 from agents.coder.diff_coder import SearchReplacePatcher, DIFF_SYS_FORMAT
 from agents.planner import build_chat_prompt_for_model
 from agents.triggers import register_node
-from agents.prompt_cache import dataset_reference_sentence, task_section
+from agents.prompt_cache import dataset_reference_sentence, routed_data_context, task_section
 
 logger = logging.getLogger("MLEvolve")
 
@@ -59,6 +59,7 @@ def _format_debug_memory_guidance(agent, similar_fixes: List[Tuple]) -> str:
 
 
 def run(agent, parent_node: SearchNode) -> SearchNode:
+    data_context = routed_data_context(agent, "code_review")
     output_requirement = (
         "Complete test inference and submission.csv generation"
         if getattr(agent.acfg, "generate_submission", True)
@@ -168,10 +169,10 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
 
     def build_prompt_complete(instructions_with_format, use_full_code_requirement=False):
         current_introduction = introduction_base + (full_code_requirement if use_full_code_requirement else "")
-        user_prompt = f"{task_section(prompt['Task description'], agent.data_preview)}{instructions_with_format}"
+        user_prompt = f"{task_section(prompt['Task description'], data_context)}{instructions_with_format}"
         assistant_prefix = (
             "Let me approach this systematically.\n"
-            f"{dataset_reference_sentence(prompt['Task description'], agent.data_preview)}\n"
+            f"{dataset_reference_sentence(prompt['Task description'], data_context)}\n"
             f"The code that needs fixing:\n{prompt['Previous (buggy) implementation']}\n"
             f"The error/issue encountered:\n{prompt['Execution output']}\n"
             f"Analyzing the root cause and parser facts:\n{parent_node.analysis_for_prompt}\n"
